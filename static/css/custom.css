@@ -1,0 +1,89 @@
+/* Custom styles for YouTube Downloader */
+
+/* Remove default outline on form controls and buttons */
+.form-control:focus,
+.btn:focus,
+.form-select:focus {
+    box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
+}
+
+/* Custom thumbnail container with smooth transition */
+#thumbnail-container {
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+}
+
+/* Progress bar custom styling */
+.progress {
+    height: 25px;
+    background-color: var(--bs-dark);
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+.progress-bar {
+    font-weight: bold;
+    padding: 0 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: width 0.5s ease;
+}
+
+/* Card hover effects */
+.card {
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Animation for the download complete icon */
+@keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+    100% { transform: scale(1); }
+}
+
+#download-complete-container .bi-check-circle,
+#download-error-container .bi-exclamation-circle {
+    animation: pulse 2s infinite;
+}
+
+/* Button hover effects */
+.btn {
+    transition: all 0.3s ease;
+}
+
+.btn-primary:hover {
+    background-color: var(--bs-primary);
+    filter: brightness(1.1);
+}
+
+.btn-success:hover {
+    background-color: var(--bs-success);
+    filter: brightness(1.1);
+}
+
+/* Improved focus styles for accessibility */
+a:focus, button:focus, input:focus, select:focus {
+    outline: 2px solid var(--bs-primary);
+    outline-offset: 2px;
+}
+
+/* Custom placeholder color */
+::placeholder {
+    color: var(--bs-secondary) !important;
+    opacity: 0.7 !important;
+}
+
+/* Loading spinner */
+.spinner-border {
+    width: 1.5rem;
+    height: 1.5rem;
+}
