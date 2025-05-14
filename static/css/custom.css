@@ -11,7 +11,7 @@
 #thumbnail-container {
     transition: all 0.3s ease;
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    background-size: cover;
+    background-size: contain;
     background-position: center;
     background-repeat: no-repeat;
 }
@@ -86,4 +86,180 @@ a:focus, button:focus, input:focus, select:focus {
 .spinner-border {
     width: 1.5rem;
     height: 1.5rem;
+}
+
+/* Channel logo next to uploader */
+.channel-logo {
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+}
+
+/* Video stats styling */
+.video-stats {
+    margin-top: 10px;
+}
+
+.video-stats i {
+    font-size: 1rem;
+    opacity: 0.8;
+}
+
+/* Duration badge overlay on thumbnail */
+.duration-badge {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    background-color: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+}
+
+#video-uploader {
+    font-size: 1.5rem !important;
+    font-weight: bold !important;
+}
+
+[data-bs-theme="dark"] {
+  /* Vibrant and Dynamic color scheme inspired by award-winning websites */
+  --bs-body-bg: #121212; /* Deep dark background */
+  --bs-body-color: #ffffff; /* Crisp white text */
+  --bs-emphasis-color: #ffffff;
+  --bs-secondary-color: #cccccc; /* Light gray for secondary text */
+  
+  --bs-tertiary-bg: #1E1E1E; /* Slightly lighter dark for cards and inputs */
+  --bs-primary: #FF5757; /* Vibrant red-orange as primary color */
+  --bs-primary-rgb: 255, 87, 87;
+  
+  --bs-success: #00D9B2; /* Bright teal as accent/success color */
+  --bs-success-rgb: 0, 217, 178;
+  
+  --bs-border-color: #333333; /* Subtle borders */
+  --bs-link-color: #00D9B2; /* Match accent color for links */
+  --bs-link-hover-color: #40E0D0; /* Lighter version on hover */
+
+  /* YouTube-themed accent for the logo */
+  --theme-accent-icon: #FF5757;
+  
+  /* Additional colors for variety */
+  --vibrant-purple: #9352F3;
+  --vibrant-purple-rgb: 147, 82, 243;
+  --soft-yellow: #FFC857;
+}
+
+/* Override existing styles for specific elements to use new theme */
+[data-bs-theme="dark"] .display-4 .bi-youtube {
+  color: var(--theme-accent-icon) !important;
+}
+
+[data-bs-theme="dark"] .progress {
+  background-color: var(--bs-tertiary-bg); 
+  border: 1px solid #333;
+}
+
+[data-bs-theme="dark"] .progress-bar {
+  background: linear-gradient(90deg, var(--bs-success) 0%, var(--vibrant-purple) 100%);
+  color: #000;
+  font-weight: 600;
+}
+
+[data-bs-theme="dark"] .form-control,
+[data-bs-theme="dark"] .form-select {
+  background-color: var(--bs-tertiary-bg);
+  border-color: var(--bs-border-color);
+  color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .form-control::placeholder,
+[data-bs-theme="dark"] .form-select::placeholder {
+  color: var(--bs-secondary-color);
+  opacity: 0.7;
+}
+
+[data-bs-theme="dark"] .btn-primary {
+  background-color: var(--bs-primary);
+  border-color: var(--bs-primary);
+  color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .btn-primary:hover {
+  background-color: #FF7070;
+  border-color: #FF7070;
+}
+
+[data-bs-theme="dark"] .btn-success {
+  background-color: var(--bs-success);
+  border-color: var(--bs-success);
+  color: #121212;
+  font-weight: 500;
+}
+
+[data-bs-theme="dark"] .btn-success:hover {
+  background-color: #00F5C8;
+  border-color: #00F5C8;
+}
+
+[data-bs-theme="dark"] .btn-outline-secondary {
+  --bs-btn-color: var(--bs-secondary-color);
+  --bs-btn-border-color: var(--bs-secondary-color);
+  --bs-btn-hover-bg: #444444;
+  --bs-btn-hover-color: var(--bs-body-color);
+  --bs-btn-active-bg: #444444;
+  --bs-btn-active-color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .btn-outline-danger {
+  --bs-btn-color: var(--bs-primary);
+  --bs-btn-border-color: var(--bs-primary);
+  --bs-btn-hover-bg: var(--bs-primary);
+  --bs-btn-hover-color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .card {
+  background-color: var(--bs-tertiary-bg);
+  border: none;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+}
+
+[data-bs-theme="dark"] .card-body {
+  border-radius: inherit;
+}
+
+[data-bs-theme="dark"] .card:hover {
+  box-shadow: 0 8px 25px rgba(255, 87, 87, 0.15) !important;
+}
+
+/* Custom styling for information cards */
+[data-bs-theme="dark"] .row.mt-3 .card:nth-child(1) i {
+  color: var(--bs-primary) !important;
+}
+
+[data-bs-theme="dark"] .row.mt-3 .card:nth-child(2) i {
+  color: var(--vibrant-purple) !important;
+}
+
+[data-bs-theme="dark"] .row.mt-3 .card:nth-child(3) i {
+  color: var(--bs-success) !important;
+}
+
+/* Ensure existing focus style uses the new primary color */
+[data-bs-theme="dark"] .form-control:focus,
+[data-bs-theme="dark"] .btn:focus,
+[data-bs-theme="dark"] .form-select:focus {
+  box-shadow: 0 0 0 0.2rem rgba(var(--bs-primary-rgb), 0.3);
+}
+
+[data-bs-theme="dark"] a:focus, 
+[data-bs-theme="dark"] button:focus, 
+[data-bs-theme="dark"] input:focus, 
+[data-bs-theme="dark"] select:focus {
+  outline-color: var(--bs-primary);
+}
+
+/* Best quality info text styling */
+[data-bs-theme="dark"] #best-quality-info {
+  color: var(--soft-yellow) !important;
+  font-weight: 500;
 }

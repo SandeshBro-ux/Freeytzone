@@ -7,8 +7,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const videoInfoCard = document.getElementById('video-info-card');
     const videoTitle = document.getElementById('video-title');
     const videoUploader = document.getElementById('video-uploader');
-    const videoDuration = document.getElementById('video-duration');
     const videoViews = document.getElementById('video-views');
+    const videoLikes = document.getElementById('video-likes');
+    const channelSubscribers = document.getElementById('channel-subscribers');
     const thumbnailContainer = document.getElementById('thumbnail-container');
     const formatSelect = document.getElementById('format-select');
     const qualityContainer = document.getElementById('quality-container');
@@ -25,7 +26,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const downloadErrorContainer = document.getElementById('download-error-container');
     const errorMessage = document.getElementById('error-message');
     const retryBtn = document.getElementById('retry-btn');
+    const bestQualityInfo = document.getElementById('best-quality-info');
     const newDownloadBtnError = document.getElementById('new-download-btn-error');
+    const channelLogo = document.getElementById('channel-logo');
 
     // State
     let currentVideoInfo = null;
@@ -79,32 +82,64 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateQualityOptions() {
         const format = formatSelect.value;
         
-        // Clear existing options except the first one
-        while (qualitySelect.options.length > 1) {
-            qualitySelect.remove(1);
+        // Helper to map resolutions to labels
+        function friendlyResolution(res) {
+            switch (res) {
+                case '3840x2160': return '4K';
+                case '2560x1440': return '2K';
+                case '1920x1080': return '1K';
+                case '1280x720': return '720';
+                default: return res;
+            }
         }
         
-        if (!currentVideoInfo) return;
+        // Clear all existing options
+        qualitySelect.innerHTML = '';
         
-        if (format === 'video') {
-            // Show quality container for videos
+        if (format === 'video' && currentVideoInfo) {
             qualityContainer.classList.remove('d-none');
-            
-            // Add video format options
-            currentVideoInfo.formats.forEach(format => {
-                if (format.resolution !== 'audio_only') {
+            currentVideoInfo.formats.forEach(fmt => {
+                if (fmt.resolution !== 'audio_only' && /^\d+x\d+$/.test(fmt.resolution)) {
                     const option = document.createElement('option');
-                    option.value = format.resolution;
-                    option.textContent = `${format.resolution}${format.fps ? ' @ ' + format.fps + 'fps' : ''}`;
+                    option.value = fmt.resolution;
+                    const label = friendlyResolution(fmt.resolution);
+                    option.textContent = `${label}${fmt.fps ? ' ' + fmt.fps + 'fps' : ''}`;
                     qualitySelect.appendChild(option);
                 }
             });
-        } else if (format === 'audio') {
-            // Hide quality container for audio
+            // Default to 1K (1080p) if available
+            if (qualitySelect.querySelector('option[value="1920x1080"]')) {
+                qualitySelect.value = '1920x1080';
+            } else {
+                qualitySelect.selectedIndex = 0;
+            }
+            // Show dynamic best-quality info based on available resolutions
+            const heights = currentVideoInfo.formats
+                .map(fmt => fmt.resolution)
+                .filter(r => /^\d+x\d+$/.test(r))
+                .map(r => parseInt(r.split('x')[1], 10));
+            const maxHeight = heights.length ? Math.max(...heights) : 0;
+            // Map maxHeight to friendly quality text
+            let bestQualityText;
+            if (maxHeight >= 2160) {
+                bestQualityText = '4K';
+            } else if (maxHeight >= 1440) {
+                bestQualityText = '2K';
+            } else if (maxHeight >= 1080) {
+                bestQualityText = '1080p';
+            } else if (maxHeight >= 720) {
+                bestQualityText = '720p';
+            } else {
+                bestQualityText = `${maxHeight}p`;
+            }
+            if (bestQualityInfo) {
+                bestQualityInfo.textContent = `The best video quality available for this video is ${bestQualityText}.`;
+            }
+        } else {
             qualityContainer.classList.add('d-none');
-        } else if (format === 'thumbnail') {
-            // Hide quality container for thumbnails
-            qualityContainer.classList.add('d-none');
+            if (bestQualityInfo) {
+                bestQualityInfo.textContent = '';
+            }
         }
     }
     
@@ -144,13 +179,60 @@ document.addEventListener('DOMContentLoaded', function() {
             // Update UI
             videoTitle.textContent = data.title || 'Unknown Title';
             videoUploader.textContent = data.uploader || 'Unknown Uploader';
-            videoDuration.textContent = formatDuration(data.duration);
             videoViews.textContent = formatViewCount(data.view_count);
             
-            // Set thumbnail if available
+            // Format and update likes count
+            const likesCount = data.like_count || 0;
+            if (videoLikes) {
+                let likesText = '';
+                if (likesCount >= 1000000) {
+                    const floored = Math.floor(likesCount / 100000) / 10;
+                    likesText = `${floored}M likes`;
+                } else if (likesCount >= 1000) {
+                    const floored = Math.floor(likesCount / 100) / 10;
+                    likesText = `${floored}K likes`;
+                } else {
+                    likesText = `${likesCount} likes`;
+                }
+                videoLikes.textContent = likesText;
+            }
+            
+            // Format and update subscriber count
+            if (channelSubscribers) {
+                if (data.subscriber_count && data.subscriber_count !== 'N/A') {
+                    let subCount = data.subscriber_count;
+                    let displaySubs;
+                    if (subCount >= 1000000) {
+                        displaySubs = `${(subCount / 1000000).toFixed(1)}M subscribers`;
+                    } else if (subCount >= 1000) {
+                        displaySubs = `${(subCount / 1000).toFixed(1)}K subscribers`;
+                    } else {
+                        displaySubs = `${subCount} subscribers`;
+                    }
+                    channelSubscribers.textContent = displaySubs;
+                } else {
+                    channelSubscribers.textContent = 'Subscribers unavailable';
+                }
+            }
+            
+            // Update channel logo if available
+            if (data.channel_logo) {
+                channelLogo.src = data.channel_logo;
+                channelLogo.style.display = 'inline-block';
+            } else {
+                channelLogo.style.display = 'none';
+            }
+            
+            // Set thumbnail and duration badge if available
             if (data.thumbnails && data.thumbnails.length > 0) {
+                // Duration badge overlay
+                const badge = document.createElement('div');
+                badge.className = 'duration-badge';
+                badge.textContent = formatDuration(data.duration);
+                // Clear container and set background
                 thumbnailContainer.innerHTML = '';
                 thumbnailContainer.style.backgroundImage = `url('${data.thumbnails[0].url}')`;
+                thumbnailContainer.appendChild(badge);
             }
             
             // Update quality options
@@ -286,6 +368,8 @@ document.addEventListener('DOMContentLoaded', function() {
         // Update link and show download complete UI
         downloadLink.href = `/api/download-file/${currentDownloadId}`;
         downloadCompleteContainer.classList.remove('d-none');
+        // Automatically trigger download
+        downloadLink.click();
     }
     
     // Show download error
