@@ -306,55 +306,67 @@ document.addEventListener('DOMContentLoaded', function() {
     // Track download progress
     function trackDownloadProgress() {
         if (!currentDownloadId) return;
-        
-        // Clear any existing intervals
-        if (progressInterval) {
-            clearInterval(progressInterval);
-        }
-        
-        // Check progress every 500ms
+        if (progressInterval) clearInterval(progressInterval);
+        let smoothProgress = 0;
+        let smoothingInterval = null;
         progressInterval = setInterval(() => {
             fetch(`/api/progress/${currentDownloadId}`)
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error('Failed to get progress');
-                    }
-                    return response.json();
-                })
+                .then(response => response.json())
                 .then(data => {
-                    if (data.error) {
-                        throw new Error(data.error);
+                    if (data.error) throw new Error(data.error);
+                    let targetProgress = Math.round(data.progress);
+                    // Smooth progress bar
+                    if (targetProgress > smoothProgress) {
+                        if (smoothingInterval) clearInterval(smoothingInterval);
+                        smoothingInterval = setInterval(() => {
+                            if (smoothProgress < targetProgress) {
+                                smoothProgress++;
+                                progressBar.style.width = `${smoothProgress}%`;
+                                progressBar.textContent = `${smoothProgress}%`;
+                            } else {
+                                clearInterval(smoothingInterval);
+                            }
+                        }, 20);
+                    } else {
+                        progressBar.style.width = `${targetProgress}%`;
+                        progressBar.textContent = `${targetProgress}%`;
+                        smoothProgress = targetProgress;
                     }
-                    
-                    // Update progress bar
-                    const progress = Math.round(data.progress);
-                    progressBar.style.width = `${progress}%`;
-                    progressBar.textContent = `${progress}%`;
-                    
-                    // Update speed and ETA
+                    // Show speed
                     if (data.speed && data.speed !== 'N/A') {
                         downloadSpeed.textContent = `Speed: ${data.speed}`;
                     }
-                    
-                    if (data.eta && data.eta !== 'N/A') {
+                    // ETA logic
+                    if (data.eta && data.eta !== 'N/A' && data.eta !== '00:00' && data.eta !== 'Processing...') {
                         downloadEta.textContent = `ETA: ${data.eta}`;
+                    } else if (data.status === 'processing') {
+                        downloadEta.textContent = `ETA: Processing...`;
+                    } else if (data.progress > 0 && data.progress < 100 && data.elapsed) {
+                        const secondsRemaining = Math.round((data.elapsed / data.progress) * (100 - data.progress));
+                        downloadEta.textContent = `ETA: ${formatDuration(secondsRemaining)}`;
+                    } else {
+                        downloadEta.textContent = `ETA: Calculating...`;
                     }
-                    
-                    // Check if download is complete or failed
+                    // Handle completion/failure
                     if (data.status === 'completed') {
                         clearInterval(progressInterval);
+                        if (smoothingInterval) clearInterval(smoothingInterval);
+                        progressBar.style.width = `100%`;
+                        progressBar.textContent = `100%`;
                         downloadComplete();
                     } else if (data.status === 'failed') {
                         clearInterval(progressInterval);
+                        if (smoothingInterval) clearInterval(smoothingInterval);
                         showDownloadError('Download failed');
                     } else if (data.status === 'canceled') {
                         clearInterval(progressInterval);
+                        if (smoothingInterval) clearInterval(smoothingInterval);
                         showDownloadError('Download was canceled');
                     }
                 })
                 .catch(error => {
-                    console.error('Error tracking progress:', error);
                     clearInterval(progressInterval);
+                    if (smoothingInterval) clearInterval(smoothingInterval);
                     showDownloadError(error.message);
                 });
         }, 500);

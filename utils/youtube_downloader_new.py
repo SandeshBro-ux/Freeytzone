@@ -11,10 +11,24 @@ from urllib.parse import urlparse, parse_qs
 import requests
 from pathlib import Path
 import sys
+import re
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logger
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed logs
+
+# Utility to convert human-readable sizes (e.g., '1.23MiB') to bytes
+def parse_size(value_str, unit):
+    v = float(value_str)
+    unit = unit.lower()
+    if unit == 'kib': return v * 1024
+    if unit == 'mib': return v * 1024**2
+    if unit == 'gib': return v * 1024**3
+    return v
 
 class YouTubeDownloader:
     def __init__(self, temp_dir):
@@ -22,14 +36,18 @@ class YouTubeDownloader:
         self.temp_dir = temp_dir
         self.downloads = {}  # Store active downloads
         
+        # Add thread lock for safe dictionary updates
+        self.lock = threading.Lock()
+        
         # Create temp dir if it doesn't exist
         os.makedirs(self.temp_dir, exist_ok=True)
         
-        # Check if yt-dlp is installed
+        # Check if yt-dlp is installed (still needed for downloading)
         try:
             subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], capture_output=True, text=True, check=True)
+            logger.debug("yt-dlp is available for downloading.")
         except (subprocess.SubprocessError, FileNotFoundError):
-            logger.error("yt-dlp is not installed or not in PATH. Please install it.")
+            logger.error("yt-dlp is not installed or not in PATH. Downloading will fail. Please install it.")
         # Check if ffmpeg is installed (required for merging audio and video)
         self.ffmpeg_available = True
         try:
@@ -130,121 +148,157 @@ class YouTubeDownloader:
             # Check if the URL has a video ID
             if parsed_url.netloc in ['www.youtube.com', 'youtube.com']:
                 query = parse_qs(parsed_url.query)
-                return 'v' in query
+                return 'v' in query and len(query['v'][0]) == 11
             elif parsed_url.netloc == 'youtu.be':
-                return len(parsed_url.path) > 1
+                return len(parsed_url.path) > 1 and len(parsed_url.path[1:]) == 11
                 
             return False
         except Exception as e:
             logger.error(f"Error validating URL: {str(e)}")
             return False
     
+    def _extract_video_id(self, url):
+        """Extract video ID from YouTube URL"""
+        parsed_url = urlparse(url)
+        if parsed_url.netloc in ['www.youtube.com', 'youtube.com']:
+            query = parse_qs(parsed_url.query)
+            if 'v' in query and query['v'][0]:
+                return query['v'][0]
+        elif parsed_url.netloc == 'youtu.be':
+            if parsed_url.path and len(parsed_url.path) > 1:
+                return parsed_url.path[1:]
+        return None
+
     def get_video_info(self, url):
-        """Get information about a YouTube video"""
-        # Validate URL
+        """Get information about a YouTube video using YouTube Data API v3"""
         if not self._is_valid_youtube_url(url):
             raise ValueError("Invalid YouTube URL")
-        # Use Python yt_dlp binding
-        try:
-            import yt_dlp
-        except ImportError:
-            raise ValueError("yt-dlp Python module not installed. Please install with 'python -m pip install yt-dlp'.")
-        ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        # Build formats list grouped by resolution
-        resolution_formats = {'best': {'format_id': 'best', 'resolution': 'Best quality (auto)', 'fps': None, 'filesize': None}}
-        has_high_quality = False
-        # Audio-only format
-        for fmt in info.get('formats', []):
-            if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
-                resolution_formats['audio_only'] = {
-                    'format_id': fmt.get('format_id'),
-                    'resolution': 'audio_only',
-                    'fps': None,
-                    'filesize': fmt.get('filesize', 0)
-                }
-                break
-        # Video formats (HD and above)
-        for fmt in info.get('formats', []):
-            if fmt.get('vcodec') != 'none':
-                height = fmt.get('height') or 0
-                if height >= 720:
-                    width = fmt.get('width') or 0
-                    res = f"{width}x{height}"
-                    resolution_formats[res] = {
-                        'format_id': fmt.get('format_id'),
-                        'resolution': res,
-                        'fps': fmt.get('fps'),
-                        'filesize': fmt.get('filesize', 0)
-                    }
-                    if height >= 1440:
-                        has_high_quality = True
-        # Update "best" description
-        if not has_high_quality:
-            max_h = max((int(k.split('x')[1]) for k in resolution_formats if 'x' in k), default=0)
-            if max_h > 0:
-                pr = "1080p" if max_h == 1080 else f"{max_h}p"
-                resolution_formats['best']['resolution'] = f"Best quality (up to {pr})"
-        else:
-            resolution_formats['best']['resolution'] = 'Best quality (up to 2K)'
-        # Convert to list and sort
-        formats = list(resolution_formats.values())
-        def fskey(f):
-            r = f.get('resolution', '')
-            if r.startswith('Best'): return 10000
-            if r == 'audio_only': return -1
-            if 'x' in r:
-                try:
-                    return int(r.split('x')[1])
-                except:
-                    return 0
-            return 0
-        formats.sort(key=fskey, reverse=True)
-        # Thumbnails
-        thumbnails = []
-        for thumb in info.get('thumbnails', []):
-            url = thumb.get('url')
-            if url:
-                w = thumb.get('width') or 0
-                h = thumb.get('height') or 0
-                thumbnails.append({'url': url, 'width': w, 'height': h})
-        thumbnails.sort(key=lambda t: t['width'] * t['height'], reverse=True)
-        # Return info
-        result = {
-            'title': info.get('title', 'Unknown Title'),
-            'duration': info.get('duration', 0),
-            'uploader': info.get('uploader', 'Unknown Uploader'),
-            'view_count': info.get('view_count', 0),
-            'like_count': info.get('like_count', 0),
-            'dislike_count': info.get('dislike_count', 0),
-            'formats': formats,
-            'thumbnails': thumbnails,
-            'video_id': info.get('id', '')
-        }
-        # Fetch channel logo via YouTube Data API if channel_id and API key are available
-        channel_id = info.get('channel_id') or info.get('uploader_id')
+
+        video_id = self._extract_video_id(url)
+        if not video_id:
+            raise ValueError("Could not extract video ID from URL")
+
         api_key = os.getenv('YOUTUBE_API_KEY')
-        result['subscriber_count'] = 'N/A'  # Default if we can't retrieve it
-        if channel_id and api_key:
+        if not api_key:
+            raise ValueError("YOUTUBE_API_KEY not found in environment variables. Please set it in .env file.")
+
+        video_info = {}
+        channel_info = {}
+
+        # 1. Fetch Video Details (snippet, contentDetails, statistics)
+        try:
+            video_api_url = 'https://www.googleapis.com/youtube/v3/videos'
+            video_params = {
+                'part': 'snippet,contentDetails,statistics',
+                'id': video_id,
+                'key': api_key
+            }
+            resp = requests.get(video_api_url, params=video_params, timeout=10)
+            resp.raise_for_status()
+            video_data = resp.json()
+            
+            if not video_data.get('items'):
+                raise ValueError(f"Video not found or API error: {video_data.get('error', {}).get('message', 'Unknown API error')}")
+            
+            item = video_data['items'][0]
+            video_info['title'] = item['snippet'].get('title', 'Unknown Title')
+            video_info['uploader'] = item['snippet'].get('channelTitle', 'Unknown Uploader')
+            video_info['channel_id'] = item['snippet'].get('channelId')
+            
+            # Duration (ISO 8601 to seconds)
+            duration_iso = item['contentDetails'].get('duration', 'PT0S')
+            # Extremely simplified ISO 8601 duration parsing for PT#M#S, PT#S, PT#H#M#S
+            duration_seconds = 0
+            if duration_iso.startswith('PT'):
+                temp_duration = duration_iso[2:]
+                if 'H' in temp_duration:
+                    parts = temp_duration.split('H')
+                    duration_seconds += int(parts[0]) * 3600
+                    temp_duration = parts[1] if len(parts) > 1 else ''
+                if 'M' in temp_duration:
+                    parts = temp_duration.split('M')
+                    duration_seconds += int(parts[0]) * 60
+                    temp_duration = parts[1] if len(parts) > 1 else ''
+                if 'S' in temp_duration:
+                    duration_seconds += int(temp_duration.replace('S', ''))
+            video_info['duration'] = duration_seconds
+
+            video_info['view_count'] = int(item['statistics'].get('viewCount', 0))
+            video_info['like_count'] = int(item['statistics'].get('likeCount', 0))
+            # Dislike count is not available with v3 API for videos
+            
+            thumbnails_data = item['snippet'].get('thumbnails', {})
+            thumbnails = []
+            for quality in ['maxres', 'standard', 'high', 'medium', 'default']:
+                if quality in thumbnails_data:
+                    thumb = thumbnails_data[quality]
+                    thumbnails.append({'url': thumb['url'], 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
+            video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t['width'] * t['height'], reverse=True)
+            video_info['video_id'] = video_id
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request error for video details: {e}")
+            raise ValueError(f"Could not fetch video details from YouTube API: {e}")
+        except (KeyError, IndexError, ValueError) as e:
+            logger.error(f"Error parsing video API response: {e}")
+            raise ValueError(f"Error processing video data from YouTube API: {e}")
+
+        # 2. Fetch Channel Details (for subscriber count and logo)
+        if video_info.get('channel_id'):
             try:
-                api_url = 'https://www.googleapis.com/youtube/v3/channels'
-                params = {'part': 'snippet,statistics', 'id': channel_id, 'key': api_key}
-                resp = requests.get(api_url, params=params, timeout=5)
+                channel_api_url = 'https://www.googleapis.com/youtube/v3/channels'
+                channel_params = {
+                    'part': 'snippet,statistics',
+                    'id': video_info['channel_id'],
+                    'key': api_key
+                }
+                resp = requests.get(channel_api_url, params=channel_params, timeout=10)
                 resp.raise_for_status()
-                items = resp.json().get('items', [])
-                if items:
-                    thumb_obj = items[0]['snippet']['thumbnails'].get('default') or {}
-                    logo_url = thumb_obj.get('url')
-                    if logo_url:
-                        result['channel_logo'] = logo_url
-                    # Try to get subscriber count
-                    if 'statistics' in items[0]:
-                        sub_count = items[0]['statistics'].get('subscriberCount')
-                        if sub_count:
-                            result['subscriber_count'] = int(sub_count)
-            except Exception as e:
-                logger.debug(f"Could not fetch channel logo: {e}")
+                channel_data = resp.json()
+
+                if channel_data.get('items'):
+                    ch_item = channel_data['items'][0]
+                    channel_info['subscriber_count'] = int(ch_item['statistics'].get('subscriberCount', 0)) \
+                        if ch_item['statistics'].get('hiddenSubscriberCount') is False else 'Hidden'
+                    
+                    ch_thumbnails_data = ch_item['snippet'].get('thumbnails', {})
+                    if 'default' in ch_thumbnails_data: #Using default as it's usually a square logo
+                        channel_info['channel_logo'] = ch_thumbnails_data['default']['url']
+                else:
+                    channel_info['subscriber_count'] = 'N/A'
+                    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"API request error for channel details: {e}")
+                channel_info['subscriber_count'] = 'N/A' # Graceful degradation
+            except (KeyError, IndexError, ValueError) as e:
+                logger.error(f"Error parsing channel API response: {e}")
+                channel_info['subscriber_count'] = 'N/A'
+        else:
+            channel_info['subscriber_count'] = 'N/A'
+
+        # Combine video and channel info
+        result = {**video_info, **channel_info}
+
+        # Simplified formats (API v3 doesn't give detailed stream info like yt-dlp)
+        # We will offer a 'best' video option (which will be handled by yt-dlp during download)
+        # and an 'audio_only' option.
+        # The actual quality selection during download will still rely on yt-dlp's capabilities.
+        result['formats'] = [
+            {'format_id': 'best_video', 'resolution': 'Best Video Available', 'fps': None, 'filesize': None, 'acodec': None, 'vcodec': 'various'},
+            {'format_id': 'best_audio', 'resolution': 'Audio Only', 'fps': None, 'filesize': None, 'acodec': 'various', 'vcodec': 'none'}
+        ]
+        # For UI consistency, providing a simplistic "best quality" text
+        # This is a placeholder as exact resolution details are not fetched here.
+        if 'contentDetails' in item and 'definition' in item['contentDetails']:
+            definition = item['contentDetails'].get('definition') # 'hd' or 'sd'
+            best_quality_text = 'HD' if definition == 'hd' else 'SD'
+            # Update the 'Best Video Available' text if possible
+            for fmt in result['formats']:
+                if fmt['format_id'] == 'best_video':
+                    fmt['resolution'] = f'Best Video Available ({best_quality_text})'
+                    break
+
+        logger.debug(f"Fetched video info via API: {result['title']}")
         return result
     
     def _download_thread(self, download_id, url, format_type, quality):
@@ -255,7 +309,8 @@ class YouTubeDownloader:
                 return
                 
             download_info = self.downloads[download_id]
-            download_info['status'] = 'downloading'
+            with self.lock:
+                download_info['status'] = 'downloading'
             
             output_path = os.path.join(self.temp_dir, download_id)
             os.makedirs(output_path, exist_ok=True)
@@ -303,6 +358,12 @@ class YouTubeDownloader:
                 download_info['mime_type'] = 'video/mp4'
                 
             elif format_type == 'audio':
+                # Ensure ffmpeg is available for audio conversion
+                if not getattr(self, 'ffmpeg_available', False):
+                    download_info['status'] = 'failed'
+                    download_info['error'] = 'ffmpeg is required for audio conversion; please install ffmpeg and ensure it is in your PATH'
+                    self._save_downloads()
+                    return
                 output_file = os.path.join(output_path, '%(title)s.%(ext)s')
                 local_command = [
                     sys.executable, '-m', 'yt_dlp',
@@ -358,25 +419,149 @@ class YouTubeDownloader:
             # Process output if stdout is available
             if process and process.stdout:
                 for line in iter(process.stdout.readline, ''):
+                    logger.debug(f"yt-dlp raw_line: {line.strip()}")
                     if download_info.get('status') == 'canceled':
                         process.terminate()
                         break
                         
-                    if '[download]' in line and '%' in line:
-                        try:
-                            progress_part = line.split('[download]')[1].strip()
-                            percentage = float(progress_part.split('%')[0].strip())
-                            download_info['progress'] = percentage
+                    if '[Merger]' in line or '[VideoConvertor]' in line:
+                        with self.lock:
+                            # Switch to processing status, cap progress at 90%
+                            download_info['status'] = 'processing'
+                            if download_info.get('progress', 0) > 90:
+                                download_info['progress'] = 90
+                            download_info['eta'] = 'Processing...'
+                            download_info['processing_stage'] = line.strip()
+                            # Record when processing started to calculate progress during this phase
+                            if 'processing_start_time' not in download_info:
+                                download_info['processing_start_time'] = time.time()
+                            logger.debug(f"Download {download_id}: Entered processing phase: {line.strip()}")
                             
-                            # Extract speed and ETA if available
-                            if 'ETA' in line:
-                                speed_part = line.split('at')[1].split('ETA')[0].strip()
-                                eta_part = line.split('ETA')[1].strip()
-                                download_info['speed'] = speed_part
-                                download_info['eta'] = eta_part
-                        except (ValueError, IndexError) as e:
-                            logger.debug(f"Error parsing progress: {str(e)}")
-                            pass
+                    if '[download]' in line and '%' in line:
+                        # Store the raw progress line for direct access by get_progress
+                        with self.lock:
+                            download_info['last_progress_line'] = line.strip()
+                        
+                        try:
+                            # Default values for this line's parsing attempt
+                            current_line_eta = None
+                            # Preserve previous speed/ETA info if current line doesn't update it
+                            current_line_speed_str = download_info.get('speed', 'N/A')
+                            current_line_speed_bytes = download_info.get('speed_bytes')
+
+                            # Special case for the very first progress line
+                            # Directly extract ETA from line using a more aggressive approach
+                            # Example line: [download]   0.0% of   50.62MiB at  499.80KiB/s ETA 01:43
+                            if "ETA" in line:
+                                eta_part = line.split("ETA")[-1].strip()
+                                if eta_part and eta_part != "Unknown ETA" and not eta_part.startswith("Unknown"):
+                                    # Directly use the ETA value from yt-dlp output
+                                    current_line_eta = eta_part
+                                    logger.debug(f"Direct ETA extraction: '{eta_part}' from line: '{line.strip()}'")
+                            
+                            # Also extract speed more aggressively
+                            if "at" in line and "/s" in line:
+                                speed_part = line.split("at")[-1].split("ETA")[0].strip()
+                                if speed_part and "/s" in speed_part:
+                                    current_line_speed_str = speed_part
+                                    logger.debug(f"Direct speed extraction: '{speed_part}' from line: '{line.strip()}'")
+
+                            # 1. Try to parse ETA directly from yt-dlp output with regex as fallback
+                            m_eta_direct = re.search(r'ETA\\s+((?:\\d{2}:)?\\d{2}:\\d{2})', line)
+                            if m_eta_direct:
+                                current_line_eta = m_eta_direct.group(1)
+                            elif "ETA Unknown ETA" in line: # yt-dlp explicitly states Unknown ETA
+                                current_line_eta = 'Unknown'
+
+                            # 2. Parse downloaded bytes and total bytes for progress
+                            # Preserve previous byte info if current line doesn't update it
+                            downloaded_bytes = download_info.get('downloaded_bytes')
+                            total_bytes = download_info.get('total_bytes')
+                            
+                            m_sizes = re.search(r'(\\d+(?:\\.\\d+)?)([KMG]iB) of (\\d+(?:\\.\\d+)?)([KMG]iB)', line)
+                            if m_sizes:
+                                down_val, down_unit, total_val, total_unit = m_sizes.groups()
+                                downloaded_bytes = parse_size(down_val, down_unit)
+                                total_bytes = parse_size(total_val, total_unit)
+                                download_info['downloaded_bytes'] = downloaded_bytes
+                                download_info['total_bytes'] = total_bytes
+                                if total_bytes is not None and total_bytes > 0:
+                                    download_info['progress'] = (downloaded_bytes / total_bytes) * 100
+                                elif download_info.get('progress', 0) < 100 : # Only update if not already 100 and no total_bytes
+                                    # Fallback to CLI percentage for progress if byte info is incomplete for calculation
+                                    m_pct = re.search(r'(\\d+(?:\\.\\d+)?)%', line)
+                                    if m_pct:
+                                        download_info['progress'] = float(m_pct.group(1))
+                            else:
+                                # Fallback to CLI percentage if full byte string not found
+                                m_pct = re.search(r'(\\d+(?:\\.\\d+)?)%', line)
+                                if m_pct:
+                                    download_info['progress'] = float(m_pct.group(1))
+
+                            # 3. Parse speed
+                            m_speed = re.search(r'at\\s+(\\d+(?:\\.\\d+)?)([KMG]iB)/s', line)
+                            if m_speed:
+                                speed_val, speed_unit = m_speed.groups()
+                                current_line_speed_bytes = parse_size(speed_val, speed_unit)
+                                current_line_speed_str = f"{speed_val}{speed_unit}/s"
+                            
+                            # Log parsed values before committing to download_info
+                            logger.debug(f"Download {download_id}: Parsed line. Current Speed: '{current_line_speed_str}', Current ETA: '{current_line_eta}', Progress: {download_info.get('progress')}")
+
+                            # 4. If ETA was not directly parsed from yt-dlp, try to calculate it
+                            if current_line_eta is None: # Not 'Unknown', and not found in HH:MM:SS format
+                                if current_line_speed_bytes and current_line_speed_bytes > 0 and \
+                                   downloaded_bytes is not None and total_bytes is not None and \
+                                   downloaded_bytes < total_bytes:
+                                    
+                                    remaining_bytes = total_bytes - downloaded_bytes
+                                    eta_seconds = int(remaining_bytes / current_line_speed_bytes)
+                                    
+                                    h, rem = divmod(eta_seconds, 3600)
+                                    m, s_rem = divmod(rem, 60)
+                                    if h > 0:
+                                        current_line_eta = f"{h}:{m:02d}:{s_rem:02d}"
+                                    else:
+                                        current_line_eta = f"{m:02d}:{s_rem:02d}"
+                                else:
+                                    # Not enough info for calculation, or speed is zero/unavailable
+                                    # Preserve existing ETA or set to 'Calculating...' if none exists
+                                    current_line_eta = download_info.get('eta', 'Calculating...')
+
+                            # 5. Update download_info with the determined ETA for the current line
+                            if current_line_eta is not None:
+                                download_info['eta'] = current_line_eta
+                            
+                            # Log just before final assignment for this line
+                            logger.debug(f"Download {download_id}: Finalizing line. Speed to store: '{current_line_speed_str}', ETA to store: '{current_line_eta}'")
+                            
+                            # Update download_info with thread safety
+                            with self.lock:
+                                # Update progress calculation if we have byte information
+                                if 'downloaded_bytes' in locals() and 'total_bytes' in locals():
+                                    if total_bytes is not None and total_bytes > 0:
+                                        download_info['progress'] = (downloaded_bytes / total_bytes) * 100
+                                
+                                # Update progress from percentage if we parsed it
+                                m_pct = re.search(r'(\d+(?:\.\d+)?)%', line)
+                                if m_pct:
+                                    download_info['progress'] = float(m_pct.group(1))
+                                    
+                                # Set speed and ETA
+                                if current_line_eta is not None:
+                                    download_info['eta'] = current_line_eta
+                                if current_line_speed_str != 'N/A':
+                                    download_info['speed'] = current_line_speed_str
+                                if current_line_speed_bytes is not None:
+                                    download_info['speed_bytes'] = current_line_speed_bytes
+
+                        except Exception as e:
+                            logger.debug(f"Error parsing progress line: '{line.strip()}'. Error: {str(e)}")
+                            # Preserve existing info or set defaults on error
+                            download_info['progress'] = download_info.get('progress', 0)
+                            download_info['speed'] = download_info.get('speed', 'N/A')
+                            download_info['eta'] = download_info.get('eta', 'N/A')
+                            
                     elif 'Destination:' in line:
                         try:
                             destination = line.split('Destination:')[1].strip()
@@ -392,10 +577,12 @@ class YouTubeDownloader:
             logger.debug(f"Download process returned code: {return_code}")
             
             if return_code == 0 and download_info.get('status') != 'canceled':
-                download_info['status'] = 'completed'
-                download_info['progress'] = 100
-                download_info['eta'] = 'Done'  # Finalize ETA
-                download_info['speed'] = 'Complete' # Finalize Speed
+                # yt-dlp finished, but post-processing may still be running
+                download_info['status'] = 'processing'
+                download_info['progress'] = 99
+                download_info['eta'] = 'Processing...'
+                download_info['speed'] = 'N/A'
+                self._save_downloads()
                 
                 # If we didn't get the output file from stdout, try to find it
                 if 'output_file' not in download_info:
@@ -464,8 +651,8 @@ class YouTubeDownloader:
                         orig_path = download_info['output_file']
                         if '.png.png' in orig_path:
                             fixed_path = orig_path.replace('.png.png', '.png')
-                                try:
-                                    os.rename(orig_path, fixed_path)
+                            try:
+                                os.rename(orig_path, fixed_path)
                                 download_info['output_file'] = fixed_path
                                 download_info['filename'] = os.path.basename(fixed_path)
                                 logger.debug(f"Fixed double .png extension by renaming to {fixed_path}")
@@ -497,6 +684,11 @@ class YouTubeDownloader:
                         except subprocess.SubprocessError as e:
                             logger.error(f"Thumbnail conversion to PNG failed: {e}")
                 
+                # When everything is truly done:
+                download_info['status'] = 'completed'
+                download_info['progress'] = 100
+                download_info['eta'] = 'Done'
+                download_info['speed'] = 'Complete'
                 self._save_downloads()
             else:
                 download_info['status'] = 'failed'
@@ -527,8 +719,8 @@ class YouTubeDownloader:
             'quality': quality,
             'status': 'starting',
             'progress': 0,
-            'speed': 'N/A',
-            'eta': 'N/A',
+            'speed': 'Calculating...',
+            'eta': 'Calculating...',
             'start_time': time.time()
         }
         
@@ -550,15 +742,110 @@ class YouTubeDownloader:
         if download_id not in self.downloads:
             raise ValueError("Download ID not found")
             
-        download_info = self.downloads[download_id]
-        return {
-            'status': download_info.get('status', 'unknown'),
-            'progress': download_info.get('progress', 0),
-            'speed': download_info.get('speed', 'N/A'),
-            'eta': download_info.get('eta', 'N/A'),
-            'format_type': download_info.get('format_type', ''),
-            'elapsed': int(time.time() - download_info.get('start_time', time.time()))
+        # Safely get a copy of the current download_info
+        with self.lock:
+            download_info = self.downloads[download_id].copy()
+        
+        # VERBOSE LOGGING: Log exactly what's in the download_info dictionary
+        logger.debug(f"PROGRESS DEBUG - Download {download_id} raw info: {str(download_info)}")
+        
+        # Copy values to prevent modifying the original dictionary
+        status = download_info.get('status', 'unknown')
+        progress = download_info.get('progress', 0)
+        speed = download_info.get('speed', 'Calculating...')
+        eta = download_info.get('eta', 'Calculating...')
+        format_type = download_info.get('format_type', '')
+        elapsed = int(time.time() - download_info.get('start_time', time.time()))
+        
+        # If there's a raw_line key in download_info that contains progress information,
+        # parse it directly here to ensure accuracy
+        raw_line = download_info.get('last_progress_line', '')
+        if raw_line and '[download]' in raw_line and '%' in raw_line:
+            try:
+                # Extract percentage directly from the line
+                pct_match = re.search(r'(\d+(?:\.\d+)?)%', raw_line)
+                if pct_match:
+                    # Cap download progress at 90% maximum to reserve 10% for processing
+                    parsed_pct = float(pct_match.group(1))
+                    if status != 'processing' and parsed_pct > 90:
+                        progress = 90
+                    else:
+                        progress = min(90, parsed_pct)
+                
+                # Direct extraction of ETA
+                if 'ETA' in raw_line:
+                    eta_part = raw_line.split('ETA')[-1].strip()
+                    if eta_part and not eta_part.startswith('Unknown'):
+                        eta = eta_part
+                
+                # Direct extraction of speed
+                if 'at' in raw_line and '/s' in raw_line:
+                    try:
+                        speed_part = raw_line.split('at')[-1].split('ETA')[0].strip()
+                        if '/s' in speed_part:
+                            speed = speed_part
+                    except:
+                        pass  # Keep current speed if parsing fails
+                        
+                logger.debug(f"Direct parsing from raw line: progress={progress}, speed={speed}, eta={eta}")
+            except Exception as e:
+                logger.error(f"Error parsing raw progress line: {str(e)}")
+                
+        # ENSURE PROGRESS IS VISIBLE: Force progress to be above 0 if downloading
+        if status == 'downloading' and progress < 0.1:
+            progress = 0.1
+        
+        # If we're in processing stage (after download, during conversion), 
+        # set progress between 90% and 99% based on elapsed time
+        if status == 'processing':
+            # Calculate processing progress based on time elapsed since entering processing
+            # Most conversions take ~5-15 seconds, so we'll estimate progress
+            processing_start = download_info.get('processing_start_time', download_info.get('start_time', time.time()))
+            processing_elapsed = time.time() - processing_start
+            
+            # Map processing time to progress range 90-99%
+            # Assume typical processing takes ~10 seconds
+            processing_progress = min(9, processing_elapsed / 10 * 9)
+            progress = 90 + processing_progress
+            speed = "Processing..."
+            
+            # Show processing stage if available
+            processing_stage = download_info.get('processing_stage', '')
+            if 'Merger' in processing_stage:
+                eta = "Merging streams..."
+            elif 'VideoConvertor' in processing_stage:
+                eta = "Preparing for download in your device..."
+            else:
+                eta = "Processing..."
+                
+            logger.debug(f"Processing progress calculation: elapsed={processing_elapsed}s, progress={progress}%")
+        
+        # ENSURE STATUS NAMES MATCH FRONTEND EXPECTATIONS
+        # Convert backend status names to what frontend expects if needed
+        status_mapping = {
+            'starting': 'starting',
+            'downloading': 'downloading',
+            'processing': 'processing',
+            'completed': 'completed',
+            'failed': 'failed',
+            'canceled': 'canceled'
         }
+        status = status_mapping.get(status, status)
+        
+        # Create result dictionary
+        result = {
+            'status': status,
+            'progress': progress,
+            'speed': speed,
+            'eta': eta,
+            'format_type': format_type,
+            'elapsed': elapsed
+        }
+        
+        # Log what we're about to return to the frontend
+        logger.debug(f"PROGRESS RESPONSE - Download {download_id}: {str(result)}")
+        
+        return result
     
     def get_download_file(self, download_id):
         """Get the path to the downloaded file"""
