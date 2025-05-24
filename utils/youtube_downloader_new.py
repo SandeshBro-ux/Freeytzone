@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 import re
 from dotenv import load_dotenv
+import yt_dlp
 
 # Load environment variables from .env file
 load_dotenv()
@@ -170,7 +171,6 @@ class YouTubeDownloader:
         return None
 
     def get_video_info(self, url):
-        """Get information about a YouTube video using YouTube Data API v3"""
         if not self._is_valid_youtube_url(url):
             raise ValueError("Invalid YouTube URL")
 
@@ -179,77 +179,185 @@ class YouTubeDownloader:
             raise ValueError("Could not extract video ID from URL")
 
         api_key = os.getenv('YOUTUBE_API_KEY')
+        # We still need the API key for channel info even if yt-dlp provides basic video info
         if not api_key:
-            raise ValueError("YOUTUBE_API_KEY not found in environment variables. Please set it in .env file.")
+            logger.warning("YOUTUBE_API_KEY not found. Channel info (subscriber count, logo) will be unavailable.")
+            # Not raising an error here, as yt-dlp might still provide video info.
 
         video_info = {}
         channel_info = {}
+        detailed_formats_available = False
+        info_source = 'api' # Default to API, override if yt-dlp succeeds
 
-        # 1. Fetch Video Details (snippet, contentDetails, statistics)
+        # 1. Attempt to get detailed info including formats using yt-dlp (with timeout)
         try:
-            video_api_url = 'https://www.googleapis.com/youtube/v3/videos'
-            video_params = {
-                'part': 'snippet,contentDetails,statistics',
-                'id': video_id,
-                'key': api_key
+            logger.debug(f"Attempting to fetch info with yt-dlp for {url}")
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'forceid': True,
+                'extract_flat': 'discard_in_playlist', # Don't extract playlist entries if a playlist URL is given by mistake
+                # 'socket_timeout': 10, # Timeout for network operations by yt-dlp (seconds)
+                # Proxy settings can be added here if you subscribe to a proxy service
+                # 'proxy': 'http://user:pass@host:port',
             }
-            resp = requests.get(video_api_url, params=video_params, timeout=10)
-            resp.raise_for_status()
-            video_data = resp.json()
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # yt-dlp's extract_info can be blocking, consider running in a thread if it causes issues
+                # For now, keeping it direct with assumption of reasonable performance or eventual timeout from server side.
+                raw_info = ydl.extract_info(url, download=False)
             
-            if not video_data.get('items'):
-                raise ValueError(f"Video not found or API error: {video_data.get('error', {}).get('message', 'Unknown API error')}")
-            
-            item = video_data['items'][0]
-            video_info['title'] = item['snippet'].get('title', 'Unknown Title')
-            video_info['uploader'] = item['snippet'].get('channelTitle', 'Unknown Uploader')
-            video_info['channel_id'] = item['snippet'].get('channelId')
-            
-            # Duration (ISO 8601 to seconds)
-            duration_iso = item['contentDetails'].get('duration', 'PT0S')
-            # Extremely simplified ISO 8601 duration parsing for PT#M#S, PT#S, PT#H#M#S
-            duration_seconds = 0
-            if duration_iso.startswith('PT'):
-                temp_duration = duration_iso[2:]
-                if 'H' in temp_duration:
-                    parts = temp_duration.split('H')
-                    duration_seconds += int(parts[0]) * 3600
-                    temp_duration = parts[1] if len(parts) > 1 else ''
-                if 'M' in temp_duration:
-                    parts = temp_duration.split('M')
-                    duration_seconds += int(parts[0]) * 60
-                    temp_duration = parts[1] if len(parts) > 1 else ''
-                if 'S' in temp_duration:
-                    duration_seconds += int(temp_duration.replace('S', ''))
-            video_info['duration'] = duration_seconds
+            if raw_info:
+                video_info['title'] = raw_info.get('title', 'Unknown Title')
+                video_info['uploader'] = raw_info.get('uploader', 'Unknown Uploader')
+                video_info['duration'] = raw_info.get('duration', 0)
+                video_info['view_count'] = raw_info.get('view_count', 0)
+                video_info['like_count'] = raw_info.get('like_count', 0)
+                video_info['video_id'] = raw_info.get('id', video_id) # Prefer yt-dlp id, fallback to extracted
+                video_info['channel_id'] = raw_info.get('channel_id') # Important for subscriber count via API
 
-            video_info['view_count'] = int(item['statistics'].get('viewCount', 0))
-            video_info['like_count'] = int(item['statistics'].get('likeCount', 0))
-            # Dislike count is not available with v3 API for videos
-            
-            thumbnails_data = item['snippet'].get('thumbnails', {})
-            thumbnails = []
-            for quality in ['maxres', 'standard', 'high', 'medium', 'default']:
-                if quality in thumbnails_data:
-                    thumb = thumbnails_data[quality]
-                    thumbnails.append({'url': thumb['url'], 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
-            video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t['width'] * t['height'], reverse=True)
-            video_info['video_id'] = video_id
+                raw_thumbnails = raw_info.get('thumbnails', [])
+                thumbnails = []
+                for thumb in raw_thumbnails:
+                    thumbnails.append({'url': thumb.get('url'), 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
+                video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API request error for video details: {e}")
-            raise ValueError(f"Could not fetch video details from YouTube API: {e}")
-        except (KeyError, IndexError, ValueError) as e:
-            logger.error(f"Error parsing video API response: {e}")
-            raise ValueError(f"Error processing video data from YouTube API: {e}")
+                # Process formats from yt-dlp
+                raw_formats = raw_info.get('formats', [])
+                processed_formats = []
+                # Add audio only option first if available
+                audio_formats = [f for f in raw_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
+                if audio_formats:
+                    best_audio = max(audio_formats, key=lambda f: f.get('tbr', 0) or f.get('abr', 0), default=None)
+                    if best_audio:
+                        processed_formats.append({
+                            'format_id': best_audio.get('format_id'), 
+                            'resolution': 'Audio Only', 
+                            'fps': None, 
+                            'filesize': best_audio.get('filesize') or best_audio.get('filesize_approx'),
+                            'ext': best_audio.get('ext'),
+                            'note': best_audio.get('format_note', 'Best Audio')
+                        })
+                
+                # Video formats (prefer mp4, then webm, etc.)
+                # Include only formats that have both video and audio, or video-only if no combined formats found
+                video_only_formats = []
+                merged_formats = []
 
-        # 2. Fetch Channel Details (for subscriber count and logo)
-        if video_info.get('channel_id'):
+                for f in raw_formats:
+                    if f.get('vcodec') != 'none':
+                        res = f.get('resolution') or (f"{f.get('width')}x{f.get('height')}" if f.get('width') and f.get('height') else None)
+                        if not res: continue # Skip if no resolution
+
+                        fmt_entry = {
+                            'format_id': f.get('format_id'), 
+                            'resolution': res, 
+                            'fps': f.get('fps'), 
+                            'filesize': f.get('filesize') or f.get('filesize_approx'),
+                            'ext': f.get('ext'),
+                            'note': f.get('format_note', res) # Use resolution as note if no specific note
+                        }
+                        if f.get('acodec') != 'none': # Combined video and audio
+                            merged_formats.append(fmt_entry)
+                        else: # Video only
+                            video_only_formats.append(fmt_entry)
+                
+                # Prioritize merged formats, then video-only. Sort by height, then fps.
+                processed_video_formats = sorted(
+                    merged_formats + video_only_formats, 
+                    key=lambda x: (int(x['resolution'].split('x')[1]), x.get('fps', 0)), 
+                    reverse=True
+                )
+                processed_formats.extend(processed_video_formats)
+                
+                if processed_formats: # Check if any formats were actually processed
+                    video_info['formats'] = processed_formats
+                    detailed_formats_available = True
+                    info_source = 'yt-dlp'
+                    logger.info(f"Successfully fetched detailed info with yt-dlp for {url}")
+                else:
+                    logger.warning(f"yt-dlp provided info but no usable formats for {url}. Falling back to API for formats.")
+
+        except yt_dlp.utils.DownloadError as e:
+            logger.warning(f"yt-dlp failed to extract info for {url}: {e}. Falling back to YouTube API.")
+        except Exception as e: # Catch any other unexpected errors from yt-dlp section
+            logger.error(f"Unexpected error during yt-dlp processing for {url}: {e}. Falling back to YouTube API.")
+
+        # 2. If yt-dlp failed or didn't provide formats, or for supplemental info, use YouTube Data API
+        if not detailed_formats_available:
+            logger.debug(f"Fetching base video info via YouTube API for {video_id}")
+            if not api_key: # Now it's an error if yt-dlp failed and we have no key
+                 raise ValueError("YOUTUBE_API_KEY not found, and yt-dlp failed to provide info.")
+            try:
+                video_api_url = 'https://www.googleapis.com/youtube/v3/videos'
+                video_params = {
+                    'part': 'snippet,contentDetails,statistics',
+                    'id': video_id,
+                    'key': api_key
+                }
+                resp = requests.get(video_api_url, params=video_params, timeout=10)
+                resp.raise_for_status()
+                video_data = resp.json()
+                
+                if not video_data.get('items'):
+                    raise ValueError(f"Video not found via API or API error: {video_data.get('error', {}).get('message', 'Unknown API error')}")
+                
+                item = video_data['items'][0]
+                # Fill in info only if not already populated by yt-dlp
+                video_info.setdefault('title', item['snippet'].get('title', 'Unknown Title'))
+                video_info.setdefault('uploader', item['snippet'].get('channelTitle', 'Unknown Uploader'))
+                video_info.setdefault('channel_id', item['snippet'].get('channelId'))
+                
+                duration_iso = item['contentDetails'].get('duration', 'PT0S')
+                duration_seconds = 0
+                if duration_iso.startswith('PT'):
+                    temp_duration = duration_iso[2:]
+                    if 'H' in temp_duration: parts = temp_duration.split('H'); duration_seconds += int(parts[0]) * 3600; temp_duration = parts[1] if len(parts) > 1 else ''
+                    if 'M' in temp_duration: parts = temp_duration.split('M'); duration_seconds += int(parts[0]) * 60; temp_duration = parts[1] if len(parts) > 1 else ''
+                    if 'S' in temp_duration: duration_seconds += int(temp_duration.replace('S', ''))
+                video_info.setdefault('duration', duration_seconds)
+
+                video_info.setdefault('view_count', int(item['statistics'].get('viewCount', 0)))
+                video_info.setdefault('like_count', int(item['statistics'].get('likeCount', 0)))
+                
+                if not video_info.get('thumbnails'): # Only if yt-dlp didn't get them
+                    thumbnails_data = item['snippet'].get('thumbnails', {})
+                    thumbnails = []
+                    for quality_key in ['maxres', 'standard', 'high', 'medium', 'default']:
+                        if quality_key in thumbnails_data:
+                            thumb = thumbnails_data[quality_key]
+                            thumbnails.append({'url': thumb['url'], 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
+                    video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
+                
+                video_info.setdefault('video_id', video_id)
+
+                # Simplified formats if yt-dlp failed
+                api_formats = [
+                    {'format_id': 'best_video_api', 'resolution': 'Best Video Available', 'note': 'Best Video (API Fallback)', 'fps': None, 'filesize': None, 'ext': 'mp4'},
+                    {'format_id': 'best_audio_api', 'resolution': 'Audio Only', 'note': 'Audio (API Fallback)', 'fps': None, 'filesize': None, 'ext': 'm4a'}
+                ]
+                definition = item['contentDetails'].get('definition', 'sd') # 'hd' or 'sd'
+                api_formats[0]['resolution'] = f'Best Video Available ({definition.upper()})'
+                api_formats[0]['note'] = f'Best Video ({definition.upper()}) (API Fallback)'
+                video_info['formats'] = api_formats
+                info_source = 'api' # Confirm source is api if we entered this block
+                logger.info(f"Fetched basic info via YouTube API for {video_id} (yt-dlp fallback).")
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"API request error for video details: {e}")
+                raise ValueError(f"Could not fetch video details from YouTube API (yt-dlp also failed): {e}")
+            except (KeyError, IndexError, ValueError) as e:
+                logger.error(f"Error parsing video API response: {e}")
+                raise ValueError(f"Error processing video data from YouTube API (yt-dlp also failed): {e}")
+
+        # 3. Fetch Channel Details (always use API if channel_id is available, as yt-dlp might not give it)
+        current_channel_id = video_info.get('channel_id')
+        if current_channel_id and api_key: # Need API key for this part
             try:
                 channel_api_url = 'https://www.googleapis.com/youtube/v3/channels'
                 channel_params = {
                     'part': 'snippet,statistics',
-                    'id': video_info['channel_id'],
+                    'id': current_channel_id,
                     'key': api_key
                 }
                 resp = requests.get(channel_api_url, params=channel_params, timeout=10)
@@ -258,47 +366,36 @@ class YouTubeDownloader:
 
                 if channel_data.get('items'):
                     ch_item = channel_data['items'][0]
-                    channel_info['subscriber_count'] = int(ch_item['statistics'].get('subscriberCount', 0)) \
-                        if ch_item['statistics'].get('hiddenSubscriberCount') is False else 'Hidden'
+                    sub_count_raw = ch_item['statistics'].get('subscriberCount')
+                    if ch_item['statistics'].get('hiddenSubscriberCount') is False and sub_count_raw is not None:
+                        channel_info['subscriber_count'] = int(sub_count_raw)
+                    elif ch_item['statistics'].get('hiddenSubscriberCount') is True:
+                        channel_info['subscriber_count'] = 'Hidden'
+                    else:
+                        channel_info['subscriber_count'] = 'N/A' # Could be missing or zero, treat as N/A
                     
                     ch_thumbnails_data = ch_item['snippet'].get('thumbnails', {})
-                    if 'default' in ch_thumbnails_data: #Using default as it's usually a square logo
+                    if 'default' in ch_thumbnails_data:
                         channel_info['channel_logo'] = ch_thumbnails_data['default']['url']
                 else:
                     channel_info['subscriber_count'] = 'N/A'
                     
             except requests.exceptions.RequestException as e:
-                logger.error(f"API request error for channel details: {e}")
-                channel_info['subscriber_count'] = 'N/A' # Graceful degradation
+                logger.warning(f"API request error for channel details: {e}. Subscriber count/logo might be unavailable.")
+                channel_info.setdefault('subscriber_count', 'N/A')
             except (KeyError, IndexError, ValueError) as e:
-                logger.error(f"Error parsing channel API response: {e}")
-                channel_info['subscriber_count'] = 'N/A'
+                logger.warning(f"Error parsing channel API response: {e}. Subscriber count/logo might be unavailable.")
+                channel_info.setdefault('subscriber_count', 'N/A')
         else:
-            channel_info['subscriber_count'] = 'N/A'
+            channel_info.setdefault('subscriber_count', 'N/A')
+            if not api_key and current_channel_id:
+                 logger.warning("Cannot fetch channel details because YOUTUBE_API_KEY is missing.")
+            elif not current_channel_id:
+                 logger.warning("Cannot fetch channel details because channel_id is missing from video info.")
 
-        # Combine video and channel info
-        result = {**video_info, **channel_info}
-
-        # Simplified formats (API v3 doesn't give detailed stream info like yt-dlp)
-        # We will offer a 'best' video option (which will be handled by yt-dlp during download)
-        # and an 'audio_only' option.
-        # The actual quality selection during download will still rely on yt-dlp's capabilities.
-        result['formats'] = [
-            {'format_id': 'best_video', 'resolution': 'Best Video Available', 'fps': None, 'filesize': None, 'acodec': None, 'vcodec': 'various'},
-            {'format_id': 'best_audio', 'resolution': 'Audio Only', 'fps': None, 'filesize': None, 'acodec': 'various', 'vcodec': 'none'}
-        ]
-        # For UI consistency, providing a simplistic "best quality" text
-        # This is a placeholder as exact resolution details are not fetched here.
-        if 'contentDetails' in item and 'definition' in item['contentDetails']:
-            definition = item['contentDetails'].get('definition') # 'hd' or 'sd'
-            best_quality_text = 'HD' if definition == 'hd' else 'SD'
-            # Update the 'Best Video Available' text if possible
-            for fmt in result['formats']:
-                if fmt['format_id'] == 'best_video':
-                    fmt['resolution'] = f'Best Video Available ({best_quality_text})'
-                    break
-
-        logger.debug(f"Fetched video info via API: {result['title']}")
+        # Combine all info
+        result = {**video_info, **channel_info, 'info_source': info_source}
+        logger.debug(f"Final video info for {result.get('title')}: Source: {info_source}, Formats count: {len(result.get('formats', []))}")
         return result
     
     def _download_thread(self, download_id, url, format_type, quality):

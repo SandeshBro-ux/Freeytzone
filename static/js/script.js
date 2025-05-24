@@ -81,62 +81,90 @@ document.addEventListener('DOMContentLoaded', function() {
     // Update the quality select based on format
     function updateQualityOptions() {
         const format = formatSelect.value;
-        
-        // Clear all existing options
-        qualitySelect.innerHTML = '';
-        
-        if (format === 'video' && currentVideoInfo && currentVideoInfo.formats) {
+        qualitySelect.innerHTML = ''; // Clear existing options
+
+        if (!currentVideoInfo || !currentVideoInfo.formats || currentVideoInfo.formats.length === 0) {
+            qualityContainer.classList.add('d-none');
+            if (bestQualityInfo) bestQualityInfo.textContent = 'Format information unavailable.';
+            return;
+        }
+
+        const infoSource = currentVideoInfo.info_source; // 'yt-dlp' or 'api'
+
+        if (format === 'video') {
             qualityContainer.classList.remove('d-none');
-            let bestQualityText = 'Video quality information unavailable';
+            let videoFormats = [];
+            let bestQualityText = 'Not available';
 
-            currentVideoInfo.formats.forEach(fmt => {
-                // We only care about video formats for the quality dropdown here
-                // The backend now sends simplified formats like 'best_video' and 'best_audio'
-                if (fmt.format_id === 'best_video') { // Or any other relevant video format_id you might add
+            if (infoSource === 'yt-dlp') {
+                // Filter for actual video formats (resolution string usually like "1920x1080")
+                // and exclude audio-only which might have a "resolution" field saying "Audio Only"
+                videoFormats = currentVideoInfo.formats.filter(fmt => 
+                    fmt.resolution && fmt.resolution.includes('x') && !fmt.resolution.toLowerCase().includes('audio')
+                );
+
+                if (videoFormats.length > 0) {
+                    // First format is usually the best quality due to backend sorting
+                    const bestFormat = videoFormats[0];
+                    const height = bestFormat.resolution.split('x')[1];
+                    bestQualityText = `${height}p`; 
+                    if (bestFormat.fps) bestQualityText += ` ${bestFormat.fps}fps`;
+                    if (parseInt(height) >= 2160) bestQualityText = `4K (${bestQualityText})`;
+                    else if (parseInt(height) >= 1440) bestQualityText = `2K (${bestQualityText})`;
+
+                    videoFormats.forEach(fmt => {
+                        const option = document.createElement('option');
+                        option.value = fmt.format_id; // Use format_id for download request
+                        let label = fmt.resolution;
+                        if (fmt.fps) label += ` ${fmt.fps}fps`;
+                        if (fmt.note && fmt.note !== fmt.resolution) label += ` (${fmt.note})`;
+                        if (fmt.ext) label += ` - ${fmt.ext}`;
+                        option.textContent = label;
+                        qualitySelect.appendChild(option);
+                    });
+                }
+            } else { // API fallback or unknown source
+                const apiVideoFormat = currentVideoInfo.formats.find(fmt => fmt.format_id && fmt.format_id.startsWith('best_video'));
+                if (apiVideoFormat) {
                     const option = document.createElement('option');
-                    option.value = fmt.format_id; // Use format_id as value
-                    option.textContent = fmt.resolution; // This is now a descriptive string like "Best Video Available (HD)"
+                    option.value = apiVideoFormat.format_id;
+                    option.textContent = apiVideoFormat.resolution; // e.g., "Best Video Available (HD)"
                     qualitySelect.appendChild(option);
-                    
-                    // Use the resolution string of the first video option for the best quality info text
-                    if (bestQualityText === 'Video quality information unavailable') { // Take the first one
-                        bestQualityText = fmt.resolution;
+                    bestQualityText = apiVideoFormat.resolution; 
+                } else {
+                     // Handle case where even API fallback has no video format (should be rare)
+                    const audioOnlyAsVideo = currentVideoInfo.formats.find(fmt => fmt.resolution && fmt.resolution.toLowerCase().includes('audio'));
+                    if(audioOnlyAsVideo){
+                         qualityContainer.classList.add('d-none'); // No video options
                     }
-                }
-            });
-
-            if (qualitySelect.options.length > 0) {
-                qualitySelect.selectedIndex = 0; // Default to the first available video option
-                if (bestQualityInfo) {
-                    bestQualityInfo.textContent = `The best video quality available for this video is ${bestQualityText}.`;
-                }
-            } else {
-                // No specific video formats found, hide quality selection
-                qualityContainer.classList.add('d-none');
-                if (bestQualityInfo) {
-                    bestQualityInfo.textContent = 'Video quality options not available.';
                 }
             }
 
-        } else if (format === 'audio' && currentVideoInfo && currentVideoInfo.formats) {
-            // For audio, quality selection is usually not needed or is handled as 'best' by default by yt-dlp
-            // So, we hide the quality dropdown.
-            qualityContainer.classList.add('d-none');
+            if (qualitySelect.options.length > 0) {
+                qualitySelect.selectedIndex = 0;
+                if (bestQualityInfo) bestQualityInfo.textContent = `The best video quality available is ${bestQualityText}.`;
+            } else {
+                qualityContainer.classList.add('d-none');
+                if (bestQualityInfo) bestQualityInfo.textContent = 'No video quality options found.';
+            }
+
+        } else if (format === 'audio') {
+            qualityContainer.classList.add('d-none'); // Typically no quality selection for audio
+            const audioFormat = currentVideoInfo.formats.find(fmt => 
+                (fmt.format_id && fmt.format_id.includes('audio')) || (fmt.resolution && fmt.resolution.toLowerCase().includes('audio'))
+            );
             if (bestQualityInfo) {
-                // Optionally, provide some info for audio
-                const audioFormat = currentVideoInfo.formats.find(f => f.format_id === 'best_audio');
-                if (audioFormat) {
-                    bestQualityInfo.textContent = `Downloading in ${audioFormat.resolution}.`;
-                }
-                 else {
-                    bestQualityInfo.textContent = 'Audio will be downloaded in the best available quality.';
+                if (audioFormat && audioFormat.note) {
+                    bestQualityInfo.textContent = `Downloading audio: ${audioFormat.note}.`;
+                } else if (audioFormat && audioFormat.resolution) {
+                    bestQualityInfo.textContent = `Downloading audio: ${audioFormat.resolution}.`;
+                }else {
+                    bestQualityInfo.textContent = 'Audio will be downloaded in best available quality.';
                 }
             }
         } else {
             qualityContainer.classList.add('d-none');
-            if (bestQualityInfo) {
-                bestQualityInfo.textContent = '';
-            }
+            if (bestQualityInfo) bestQualityInfo.textContent = '';
         }
     }
     
