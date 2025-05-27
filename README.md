@@ -1,6 +1,6 @@
 # YouTube Downloader
 
-A powerful YouTube downloader web application with 2K video quality support, MP3 extraction, thumbnail downloads, and real-time progress tracking.
+A powerful YouTube downloader web application with 2K video quality support, MP3 extraction, thumbnail downloads, and real-time progress tracking. Now with browser emulation to bypass YouTube's bot verification!
 
 ## Features
 
@@ -10,6 +10,7 @@ A powerful YouTube downloader web application with 2K video quality support, MP3
 - **Progress Tracking**: Real-time download progress with speed and ETA
 - **Download Management**: Cancel ongoing downloads or start new ones
 - **User-Friendly Interface**: Clean, responsive design with Bootstrap
+- **Bot Verification Bypass**: Uses browser emulation to appear as a real human user
 
 ## How to Use
 
@@ -28,6 +29,7 @@ A powerful YouTube downloader web application with 2K video quality support, MP3
 
 - Built with Flask (Python web framework)
 - Uses yt-dlp for YouTube video extraction
+- Selenium and headless Chrome for browser emulation
 - Bootstrap for responsive UI
 - AJAX for seamless background operations
 - Downloads persist in a dedicated directory
@@ -39,6 +41,21 @@ A powerful YouTube downloader web application with 2K video quality support, MP3
 - flask-cors
 - yt-dlp
 - requests
+- selenium
+- webdriver-manager
+- Chrome/Chromium and ChromeDriver (installed automatically on Render)
+
+## Deployment on Render
+
+1. Create a new Web Service on Render
+2. Connect your GitHub repository
+3. Configure the service with:
+   - **Build Command**: `chmod +x render_setup.sh && ./render_setup.sh && pip install -r requirements.txt`
+   - **Start Command**: `gunicorn app:app`
+   - **Environment Variables**:
+     - `FFMPEG_PATH`: `/usr/bin/ffmpeg` (optional)
+     - `YOUTUBE_API_KEY`: Your YouTube API key (optional, for fallback)
+     - `YTDLP_PROXY_URL`: Your proxy URL (optional, for additional layer of protection)
 
 ## Usage Notes
 

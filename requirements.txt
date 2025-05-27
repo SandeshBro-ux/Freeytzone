@@ -4,3 +4,5 @@ requests
 gunicorn
 flask-cors
 python-dotenv
+selenium>=4.0.0
+webdriver-manager

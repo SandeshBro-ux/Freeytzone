@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 import datetime
+import random
 import shutil
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -15,13 +16,20 @@ import re
 from dotenv import load_dotenv
 import yt_dlp
 import tempfile # For temporary cookie file
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Configure logger
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed logs
+logging.basicConfig(level=logging.DEBUG if os.environ.get('DEBUG') else logging.INFO)  # Set to DEBUG for detailed logs
 
 # Utility to convert human-readable sizes (e.g., '1.23MiB') to bytes
 def parse_size(value_str, unit):
@@ -172,11 +180,14 @@ class YouTubeDownloader:
         return None
     
     def get_video_info(self, url):
+        """Get information about a YouTube video using browser emulation to avoid bot detection"""
         if not self._is_valid_youtube_url(url):
             raise ValueError("Invalid YouTube URL")
+        
         video_id = self._extract_video_id(url)
         if not video_id:
             raise ValueError("Could not extract video ID from URL")
+        
         api_key = os.getenv('YOUTUBE_API_KEY')
         if not api_key:
             logger.warning("YOUTUBE_API_KEY not found. Channel info will be unavailable.")
@@ -185,101 +196,257 @@ class YouTubeDownloader:
         channel_info = {}
         detailed_formats_available = False
         info_source = 'api'
-        temp_cookie_file_path = None
-        proxy_url = os.getenv('YTDLP_PROXY_URL') # Define proxy_url here to use in logging
-
+        
         try:
-            logger.debug(f"Attempting to fetch info with yt-dlp for {url}")
-            ydl_opts = {
-                'quiet': True, 'no_warnings': True, 'skip_download': True,
-                'forceid': True, 'extract_flat': 'discard_in_playlist',
-            }
-            cookies_content = os.getenv('YTDLP_COOKIES_CONTENT')
-            if cookies_content:
-                try:
-                    with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as tmp_cookie_file:
-                        tmp_cookie_file.write(cookies_content)
-                        temp_cookie_file_path = tmp_cookie_file.name
-                    ydl_opts['cookiefile'] = temp_cookie_file_path
-                    logger.info(f"Using temporary cookie file for yt-dlp: {temp_cookie_file_path}")
-                except Exception as e:
-                    logger.error(f"Error creating or writing temporary cookie file: {e}")
-            else:
-                logger.info("No YTDLP_COOKIES_CONTENT. Proceeding without cookie file for yt-dlp.")
+            logger.debug(f"Attempting to fetch info with browser emulation for {url}")
+            # Setup Chrome options for headless browser
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
             
+            # Mimic a real browser with realistic window size
+            chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36")
+            
+            # Add fingerprint randomization to avoid detection
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option("useAutomationExtension", False)
+            
+            # Add proxy if available
+            proxy_url = os.getenv('YTDLP_PROXY_URL')
             if proxy_url:
-                ydl_opts['proxy'] = proxy_url
-                logger.info(f"Using proxy for yt-dlp: {proxy_url}")
+                chrome_options.add_argument(f'--proxy-server={proxy_url}')
+                logger.info(f"Using proxy for browser emulation: {proxy_url}")
             else:
-                logger.info("No YTDLP_PROXY_URL. Proceeding without proxy for yt-dlp.")
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                raw_info = ydl.extract_info(url, download=False)
+                logger.info("No YTDLP_PROXY_URL. Proceeding without proxy for browser.")
             
-            if raw_info: # yt-dlp processing logic (condensed for brevity, ensure it's complete)
-                video_info['title'] = raw_info.get('title', 'Unknown Title')
-                video_info['uploader'] = raw_info.get('uploader', 'Unknown Uploader')
-                video_info['duration'] = raw_info.get('duration', 0)
-                video_info['view_count'] = raw_info.get('view_count', 0)
-                video_info['like_count'] = raw_info.get('like_count', 0)
-                video_info['video_id'] = raw_info.get('id', video_id)
-                video_info['channel_id'] = raw_info.get('channel_id')
-                raw_thumbnails = raw_info.get('thumbnails', [])
-                thumbnails = []
-                for thumb in raw_thumbnails:
-                    thumbnails.append({'url': thumb.get('url'), 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
-                video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
-                raw_formats = raw_info.get('formats', [])
-                processed_formats = []
-                audio_formats_yt_dlp = [f for f in raw_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
-                if audio_formats_yt_dlp:
-                    best_audio = max(audio_formats_yt_dlp, key=lambda f: f.get('tbr', 0) or f.get('abr', 0), default=None)
-                    if best_audio:
-                        processed_formats.append({
-                            'format_id': best_audio.get('format_id'), 'resolution': 'Audio Only', 'fps': None, 
-                            'filesize': best_audio.get('filesize') or best_audio.get('filesize_approx'),
-                            'ext': best_audio.get('ext'), 'note': best_audio.get('format_note', 'Best Audio')
-                        })
-                video_only_formats = []
-                merged_formats = []
-                for f_item in raw_formats: # Renamed f to f_item to avoid conflict if outer f exists
-                    if f_item.get('vcodec') != 'none':
-                        res = f_item.get('resolution') or (f"{f_item.get('width')}x{f_item.get('height')}" if f_item.get('width') and f_item.get('height') else None)
-                        if not res: continue
-                        fmt_entry = {
-                            'format_id': f_item.get('format_id'), 'resolution': res, 'fps': f_item.get('fps'), 
-                            'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 'ext': f_item.get('ext'),
-                            'note': f_item.get('format_note', res)
-                        }
-                        if f_item.get('acodec') != 'none': merged_formats.append(fmt_entry)
-                        else: video_only_formats.append(fmt_entry)
-                processed_video_formats = sorted(merged_formats + video_only_formats, 
-                    key=lambda x: (int(x['resolution'].split('x')[1]), x.get('fps', 0)), reverse=True)
-                processed_formats.extend(processed_video_formats)
-                if processed_formats:
-                    video_info['formats'] = processed_formats
-                    detailed_formats_available = True
-                    info_source = 'yt-dlp'
-                    logger.info(f"Successfully fetched detailed info with yt-dlp for {url}")
-                else:
-                    logger.warning(f"yt-dlp provided info but no usable formats for {url}. Falling back to API.")
-
-        except yt_dlp.utils.DownloadError as e:
-            logger.warning(f"yt-dlp DownloadError for {url} (Proxy: {proxy_url if proxy_url else 'N/A'}): {e}. Falling back to API.")
+            # Setup Chrome driver
+            try:
+                # First try webdriver_manager approach (for environments where it works)
+                service = Service(ChromeDriverManager().install())
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+            except Exception as e:
+                logger.warning(f"Failed to use webdriver_manager: {e}. Trying system ChromeDriver.")
+                # Fall back to system ChromeDriver
+                driver = webdriver.Chrome(options=chrome_options)
+            
+            try:
+                # First visit YouTube homepage to establish a normal session
+                driver.get("https://www.youtube.com/")
+                time.sleep(random.uniform(1, 3))  # Random delay like a human
+                
+                # Perform some random scrolling to appear human-like
+                driver.execute_script(f"window.scrollTo(0, {random.randint(100, 300)});")
+                time.sleep(random.uniform(1, 2))
+                
+                # Now navigate to the actual video
+                driver.get(url)
+                
+                # Wait for video to load
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.ID, "movie_player"))
+                )
+                
+                # Add more realistic interactions
+                time.sleep(random.uniform(1, 3))
+                
+                # Get cookies from browser session
+                cookies = driver.get_cookies()
+                
+                # Create a temporary cookie file for yt-dlp
+                temp_cookie_file_path = None
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as tmp_cookie_file:
+                    # Format cookies for yt-dlp
+                    for cookie in cookies:
+                        domain = cookie.get('domain', '')
+                        if domain.startswith('.'):
+                            domain = domain[1:]
+                        expires = cookie.get('expiry', 0)
+                        secure = cookie.get('secure', False)
+                        httpOnly = cookie.get('httpOnly', False)
+                        tmp_cookie_file.write(f"{domain}\tTRUE\t{cookie.get('path', '/')}\t{str(secure).upper()}\t{expires}\t{cookie.get('name', '')}\t{cookie.get('value', '')}\n")
+                    
+                    temp_cookie_file_path = tmp_cookie_file.name
+                    logger.info(f"Created cookie file from browser session: {temp_cookie_file_path}")
+                
+                # Now use yt-dlp with the browser session cookies
+                ydl_opts = {
+                    'quiet': True, 
+                    'no_warnings': True, 
+                    'skip_download': True,
+                    'forceid': True, 
+                    'extract_flat': 'discard_in_playlist',
+                    'cookiefile': temp_cookie_file_path
+                }
+                
+                # Add proxy if available
+                if proxy_url:
+                    ydl_opts['proxy'] = proxy_url
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    raw_info = ydl.extract_info(url, download=False)
+                
+                if raw_info:
+                    video_info['title'] = raw_info.get('title', 'Unknown Title')
+                    video_info['uploader'] = raw_info.get('uploader', 'Unknown Uploader')
+                    video_info['duration'] = raw_info.get('duration', 0)
+                    video_info['view_count'] = raw_info.get('view_count', 0)
+                    video_info['like_count'] = raw_info.get('like_count', 0)
+                    video_info['video_id'] = raw_info.get('id', video_id)
+                    video_info['channel_id'] = raw_info.get('channel_id')
+                    raw_thumbnails = raw_info.get('thumbnails', [])
+                    thumbnails = []
+                    for thumb in raw_thumbnails:
+                        thumbnails.append({'url': thumb.get('url'), 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
+                    video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
+                    raw_formats = raw_info.get('formats', [])
+                    processed_formats = []
+                    audio_formats_yt_dlp = [f for f in raw_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
+                    if audio_formats_yt_dlp:
+                        best_audio = max(audio_formats_yt_dlp, key=lambda f: f.get('tbr', 0) or f.get('abr', 0), default=None)
+                        if best_audio:
+                            processed_formats.append({
+                                'format_id': best_audio.get('format_id'), 'resolution': 'Audio Only', 'fps': None, 
+                                'filesize': best_audio.get('filesize') or best_audio.get('filesize_approx'),
+                                'ext': best_audio.get('ext'), 'note': best_audio.get('format_note', 'Best Audio')
+                            })
+                    video_only_formats = []
+                    merged_formats = []
+                    for f_item in raw_formats:
+                        if f_item.get('vcodec') != 'none':
+                            res = f_item.get('resolution') or (f"{f_item.get('width')}x{f_item.get('height')}" if f_item.get('width') and f_item.get('height') else None)
+                            if not res: continue
+                            fmt_entry = {
+                                'format_id': f_item.get('format_id'), 'resolution': res, 'fps': f_item.get('fps'), 
+                                'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 'ext': f_item.get('ext'),
+                                'note': f_item.get('format_note', res)
+                            }
+                            if f_item.get('acodec') != 'none': merged_formats.append(fmt_entry)
+                            else: video_only_formats.append(fmt_entry)
+                    processed_video_formats = sorted(merged_formats + video_only_formats, 
+                        key=lambda x: (int(x['resolution'].split('x')[1]), x.get('fps', 0)), reverse=True)
+                    processed_formats.extend(processed_video_formats)
+                    if processed_formats:
+                        video_info['formats'] = processed_formats
+                        detailed_formats_available = True
+                        info_source = 'browser+yt-dlp'
+                        logger.info(f"Successfully fetched detailed info with browser emulation for {url}")
+                    else:
+                        logger.warning(f"Browser+yt-dlp provided info but no usable formats for {url}. Falling back to API.")
+            finally:
+                # Close the browser
+                driver.quit()
+                
+                # Clean up temporary cookie file
+                if temp_cookie_file_path and os.path.exists(temp_cookie_file_path):
+                    try:
+                        os.remove(temp_cookie_file_path)
+                        logger.info(f"Removed temporary cookie file: {temp_cookie_file_path}")
+                    except Exception as e:
+                        logger.error(f"Error removing temporary cookie file {temp_cookie_file_path}: {e}")
+        
         except Exception as e:
-            logger.error(f"Unexpected error during yt-dlp for {url} (Proxy: {proxy_url if proxy_url else 'N/A'}): {e}. Falling back to API.")
-        finally:
-            if temp_cookie_file_path and os.path.exists(temp_cookie_file_path):
-                try:
-                    os.remove(temp_cookie_file_path)
-                    logger.info(f"Removed temporary cookie file: {temp_cookie_file_path}")
-                except Exception as e:
-                    logger.error(f"Error removing temporary cookie file {temp_cookie_file_path}: {e}")
+            logger.error(f"Browser emulation failed for {url}: {e}. Falling back to regular yt-dlp.")
+            # Fall back to regular yt-dlp method if browser approach fails
+            temp_cookie_file_path = None
+            proxy_url = os.getenv('YTDLP_PROXY_URL')
+            
+            try:
+                logger.debug(f"Attempting fallback to direct yt-dlp for {url}")
+                ydl_opts = {
+                    'quiet': True, 'no_warnings': True, 'skip_download': True,
+                    'forceid': True, 'extract_flat': 'discard_in_playlist',
+                }
+                cookies_content = os.getenv('YTDLP_COOKIES_CONTENT')
+                if cookies_content:
+                    try:
+                        with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as tmp_cookie_file:
+                            tmp_cookie_file.write(cookies_content)
+                            temp_cookie_file_path = tmp_cookie_file.name
+                        ydl_opts['cookiefile'] = temp_cookie_file_path
+                        logger.info(f"Using temporary cookie file for yt-dlp fallback: {temp_cookie_file_path}")
+                    except Exception as e:
+                        logger.error(f"Error creating or writing temporary cookie file: {e}")
+                else:
+                    logger.info("No YTDLP_COOKIES_CONTENT. Proceeding without cookie file for yt-dlp fallback.")
+                
+                if proxy_url:
+                    ydl_opts['proxy'] = proxy_url
+                    logger.info(f"Using proxy for yt-dlp fallback: {proxy_url}")
+                else:
+                    logger.info("No YTDLP_PROXY_URL. Proceeding without proxy for yt-dlp fallback.")
 
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    raw_info = ydl.extract_info(url, download=False)
+                
+                # Process raw_info the same as in the browser approach
+                if raw_info:
+                    # Process video info (same as browser approach)
+                    video_info['title'] = raw_info.get('title', 'Unknown Title')
+                    video_info['uploader'] = raw_info.get('uploader', 'Unknown Uploader')
+                    video_info['duration'] = raw_info.get('duration', 0)
+                    video_info['view_count'] = raw_info.get('view_count', 0)
+                    video_info['like_count'] = raw_info.get('like_count', 0)
+                    video_info['video_id'] = raw_info.get('id', video_id)
+                    video_info['channel_id'] = raw_info.get('channel_id')
+                    raw_thumbnails = raw_info.get('thumbnails', [])
+                    thumbnails = []
+                    for thumb in raw_thumbnails:
+                        thumbnails.append({'url': thumb.get('url'), 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
+                    video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
+                    raw_formats = raw_info.get('formats', [])
+                    processed_formats = []
+                    audio_formats_yt_dlp = [f for f in raw_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
+                    if audio_formats_yt_dlp:
+                        best_audio = max(audio_formats_yt_dlp, key=lambda f: f.get('tbr', 0) or f.get('abr', 0), default=None)
+                        if best_audio:
+                            processed_formats.append({
+                                'format_id': best_audio.get('format_id'), 'resolution': 'Audio Only', 'fps': None, 
+                                'filesize': best_audio.get('filesize') or best_audio.get('filesize_approx'),
+                                'ext': best_audio.get('ext'), 'note': best_audio.get('format_note', 'Best Audio')
+                            })
+                    video_only_formats = []
+                    merged_formats = []
+                    for f_item in raw_formats:
+                        if f_item.get('vcodec') != 'none':
+                            res = f_item.get('resolution') or (f"{f_item.get('width')}x{f_item.get('height')}" if f_item.get('width') and f_item.get('height') else None)
+                            if not res: continue
+                            fmt_entry = {
+                                'format_id': f_item.get('format_id'), 'resolution': res, 'fps': f_item.get('fps'), 
+                                'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 'ext': f_item.get('ext'),
+                                'note': f_item.get('format_note', res)
+                            }
+                            if f_item.get('acodec') != 'none': merged_formats.append(fmt_entry)
+                            else: video_only_formats.append(fmt_entry)
+                    processed_video_formats = sorted(merged_formats + video_only_formats, 
+                        key=lambda x: (int(x['resolution'].split('x')[1]), x.get('fps', 0)), reverse=True)
+                    processed_formats.extend(processed_video_formats)
+                    if processed_formats:
+                        video_info['formats'] = processed_formats
+                        detailed_formats_available = True
+                        info_source = 'yt-dlp'
+                        logger.info(f"Successfully fetched detailed info with direct yt-dlp for {url}")
+                    else:
+                        logger.warning(f"yt-dlp provided info but no usable formats for {url}. Falling back to API.")
+            except yt_dlp.utils.DownloadError as e:
+                logger.warning(f"yt-dlp DownloadError for {url} (Proxy: {proxy_url if proxy_url else 'N/A'}): {e}. Falling back to API.")
+            except Exception as e:
+                logger.error(f"Unexpected error during yt-dlp for {url} (Proxy: {proxy_url if proxy_url else 'N/A'}): {e}. Falling back to API.")
+            finally:
+                if temp_cookie_file_path and os.path.exists(temp_cookie_file_path):
+                    try:
+                        os.remove(temp_cookie_file_path)
+                        logger.info(f"Removed temporary cookie file: {temp_cookie_file_path}")
+                    except Exception as e:
+                        logger.error(f"Error removing temporary cookie file {temp_cookie_file_path}: {e}")
+
+        # API Fallback for both browser and direct yt-dlp approaches
         if not detailed_formats_available:
             logger.debug(f"Fetching base video info via YouTube API for {video_id}")
             if not api_key:
-                raise ValueError("YOUTUBE_API_KEY not found, and yt-dlp failed to provide info.")
+                raise ValueError("YOUTUBE_API_KEY not found, and both browser and yt-dlp approaches failed to provide info.")
             try:
                 video_api_url = 'https://www.googleapis.com/youtube/v3/videos'
                 video_params = {'part': 'snippet,contentDetails,statistics', 'id': video_id, 'key': api_key}
@@ -320,14 +487,15 @@ class YouTubeDownloader:
                 api_formats[0]['note'] = f'Best Video ({definition.upper()}) (API Fallback)'
                 video_info['formats'] = api_formats
                 info_source = 'api'
-                logger.info(f"Fetched basic info via YouTube API for {video_id} (yt-dlp fallback).")
+                logger.info(f"Fetched basic info via YouTube API for {video_id} (browser and yt-dlp fallback).")
             except requests.exceptions.RequestException as e:
-                logger.error(f"API request error (yt-dlp also failed): {e}")
-                raise ValueError(f"Could not fetch video from YouTube API (yt-dlp also failed): {e}")
+                logger.error(f"API request error (browser and yt-dlp also failed): {e}")
+                raise ValueError(f"Could not fetch video from YouTube API (browser and yt-dlp also failed): {e}")
             except (KeyError, IndexError, ValueError) as e:
-                logger.error(f"API parsing error (yt-dlp also failed): {e}")
-                raise ValueError(f"Error processing API data (yt-dlp also failed): {e}")
+                logger.error(f"API parsing error (browser and yt-dlp also failed): {e}")
+                raise ValueError(f"Error processing API data (browser and yt-dlp also failed): {e}")
         
+        # Channel info fetching - same as before
         current_channel_id = video_info.get('channel_id')
         if current_channel_id and api_key:
             try:
@@ -375,7 +543,85 @@ class YouTubeDownloader:
             output_path = os.path.join(self.temp_dir, download_id)
             os.makedirs(output_path, exist_ok=True)
             
-            local_command = None  # Initialize command variable
+            # First try to get cookies from a browser session to avoid bot verification
+            temp_cookie_file_path = None
+            try:
+                # Setup Chrome options for headless browser
+                chrome_options = Options()
+                chrome_options.add_argument("--headless")
+                chrome_options.add_argument("--no-sandbox")
+                chrome_options.add_argument("--disable-dev-shm-usage")
+                
+                # Mimic a real browser with realistic window size
+                chrome_options.add_argument("--window-size=1920,1080")
+                chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36")
+                
+                # Add fingerprint randomization to avoid detection
+                chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+                chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                chrome_options.add_experimental_option("useAutomationExtension", False)
+                
+                # Add proxy if available
+                proxy_url = os.getenv('YTDLP_PROXY_URL')
+                if proxy_url:
+                    chrome_options.add_argument(f'--proxy-server={proxy_url}')
+                    logger.info(f"Using proxy for browser emulation in download: {proxy_url}")
+                
+                # Setup Chrome driver
+                try:
+                    # First try webdriver_manager approach
+                    service = Service(ChromeDriverManager().install())
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                except Exception as e:
+                    logger.warning(f"Failed to use webdriver_manager: {e}. Trying system ChromeDriver.")
+                    # Fall back to system ChromeDriver
+                    driver = webdriver.Chrome(options=chrome_options)
+                
+                try:
+                    # First visit YouTube homepage to establish a normal session
+                    driver.get("https://www.youtube.com/")
+                    time.sleep(random.uniform(1, 3))  # Random delay like a human
+                    
+                    # Perform some random scrolling to appear human-like
+                    driver.execute_script(f"window.scrollTo(0, {random.randint(100, 300)});")
+                    time.sleep(random.uniform(1, 2))
+                    
+                    # Now navigate to the actual video
+                    driver.get(url)
+                    
+                    # Wait for video to load
+                    WebDriverWait(driver, 20).until(
+                        EC.presence_of_element_located((By.ID, "movie_player"))
+                    )
+                    
+                    # Add more realistic interactions
+                    time.sleep(random.uniform(1, 3))
+                    
+                    # Get cookies from browser session
+                    cookies = driver.get_cookies()
+                    
+                    # Create a temporary cookie file for yt-dlp
+                    with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as tmp_cookie_file:
+                        # Format cookies for yt-dlp
+                        for cookie in cookies:
+                            domain = cookie.get('domain', '')
+                            if domain.startswith('.'):
+                                domain = domain[1:]
+                            expires = cookie.get('expiry', 0)
+                            secure = cookie.get('secure', False)
+                            httpOnly = cookie.get('httpOnly', False)
+                            tmp_cookie_file.write(f"{domain}\tTRUE\t{cookie.get('path', '/')}\t{str(secure).upper()}\t{expires}\t{cookie.get('name', '')}\t{cookie.get('value', '')}\n")
+                        
+                        temp_cookie_file_path = tmp_cookie_file.name
+                        logger.info(f"Created cookie file from browser session for download: {temp_cookie_file_path}")
+                finally:
+                    # Close the browser
+                    driver.quit()
+            except Exception as e:
+                logger.error(f"Browser emulation failed for download {download_id}: {e}. Will try without browser cookies.")
+                temp_cookie_file_path = None
+            
+            local_command = None
             
             if format_type == 'video':
                 # Ensure ffmpeg is available for merging streams
@@ -408,8 +654,19 @@ class YouTubeDownloader:
                     '--recode-video', 'mp4',
                     '-o', output_file,
                     '--newline',
-                    url
                 ]
+                
+                # Add cookie file if we have it
+                if temp_cookie_file_path:
+                    local_command.extend(['--cookies', temp_cookie_file_path])
+                
+                # Add proxy if available
+                proxy_url = os.getenv('YTDLP_PROXY_URL')
+                if proxy_url:
+                    local_command.extend(['--proxy', proxy_url])
+                
+                # Add URL as the last parameter
+                local_command.append(url)
                 
                 # Log the command for debugging
                 logger.debug(f"Video download command: {' '.join(local_command)}")
@@ -434,8 +691,19 @@ class YouTubeDownloader:
                     '--postprocessor-args', "-codec:a libmp3lame -q:a 0",
                     '-o', output_file,
                     '--newline',
-                    url
                 ]
+                
+                # Add cookie file if we have it
+                if temp_cookie_file_path:
+                    local_command.extend(['--cookies', temp_cookie_file_path])
+                
+                # Add proxy if available
+                proxy_url = os.getenv('YTDLP_PROXY_URL')
+                if proxy_url:
+                    local_command.extend(['--proxy', proxy_url])
+                
+                # Add URL as the last parameter
+                local_command.append(url)
                 
                 logger.debug(f"Audio download command: {' '.join(local_command)}")
                 
@@ -443,23 +711,37 @@ class YouTubeDownloader:
                 download_info['mime_type'] = 'audio/mpeg'
                 
             elif format_type == 'thumbnail':
-                # Use template with dynamic extension from yt-dlp conversion
-                thumbnail_output_template = os.path.join(output_path, '%(title)s_thumbnail.%(ext)s')
+                # Get video info to get the best thumbnail
+                video_info = self.get_video_info(url)
                 
-                local_command = [
-                    sys.executable, '-m', 'yt_dlp',
-                    '--write-thumbnail',  # Tell yt-dlp to download the thumbnail
-                    '--convert-thumbnails', 'png', # Convert thumbnail to PNG
-                    '--skip-download',    # Don't download video/audio
-                    '-o', thumbnail_output_template,
-                    '--newline',
-                    url
-                ]
-                logger.debug(f"Thumbnail download command: {' '.join(local_command)}")
+                if not video_info['thumbnails']:
+                    raise ValueError("No thumbnails found for this video")
                 
-                # Mime type will be determined after download, default or use common
-                download_info['expected_extension'] = 'png' 
-                download_info['mime_type'] = 'image/png'
+                # Get the best quality thumbnail
+                best_thumbnail = video_info['thumbnails'][0]
+                thumbnail_url = best_thumbnail['url']
+                
+                # Download the thumbnail
+                response = requests.get(thumbnail_url, stream=True)
+                if response.status_code != 200:
+                    raise ValueError(f"Failed to download thumbnail: HTTP {response.status_code}")
+                
+                filename = f"{video_info['title']}_thumbnail.jpg"
+                # Remove invalid characters from filename
+                filename = "".join(c for c in filename if c.isalnum() or c in "._- ")
+                file_path = os.path.join(output_path, filename)
+                
+                with open(file_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                download_info['output_file'] = file_path
+                download_info['filename'] = filename
+                download_info['mime_type'] = 'image/jpeg'
+                download_info['status'] = 'completed'
+                download_info['progress'] = 100
+                self._save_downloads()
+                return
             
             # If we get here, we should have a command for video or audio download
             if not local_command:
