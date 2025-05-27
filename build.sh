@@ -18,18 +18,37 @@ chmod +x chromedriver
 mv chromedriver $HOME/chrome-bin/
 rm -f chromedriver_linux64.zip
 
-# Use direct download for a headless Chrome binary (ChromeDP)
+# Use a more direct approach for headless Chrome - use the prebuilt binary
 echo "Downloading headless Chrome..."
 mkdir -p $HOME/tmp
 cd $HOME/tmp
-wget -q https://github.com/Sparticuz/chromium/releases/download/v114.0.0/chromium-v114.0.0-pack.tar
-tar -xf chromium-v114.0.0-pack.tar
-cp -r chrome-linux/* $HOME/chrome-bin/
-rm -rf chrome-linux chromium-v114.0.0-pack.tar
+
+# Download the headless Chromium binary directly
+wget -q https://github.com/Sparticuz/chromium/releases/download/v114.0.0/chromium-v114.0.0-linux.zip
+echo "Extracting Chrome binary..."
+unzip -q chromium-v114.0.0-linux.zip
+
+# Check what files were extracted (for debugging)
+echo "Extracted files:"
+ls -la
+
+# The main binary should be called "headless-chromium"
+if [ -f "headless-chromium" ]; then
+    echo "Found headless-chromium binary"
+    chmod +x headless-chromium
+    mv headless-chromium $HOME/chrome-bin/
+else
+    echo "ERROR: headless-chromium binary not found!"
+    ls -la
+    exit 1
+fi
+
+# Clean up
 cd -
+rm -rf $HOME/tmp
 
 # Verify installation
-echo "Chrome binary path: $HOME/chrome-bin/chrome"
+echo "Chrome binary path: $HOME/chrome-bin/headless-chromium"
 echo "ChromeDriver path: $HOME/chrome-bin/chromedriver"
 echo "ChromeDriver version: $($HOME/chrome-bin/chromedriver --version)"
 

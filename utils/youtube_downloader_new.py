@@ -33,19 +33,21 @@ logging.basicConfig(level=logging.DEBUG if os.environ.get('DEBUG') else logging.
 
 # Helper function to get Chrome path on Render
 def get_chrome_path():
-    # First check the home directory for the Render Chrome binary
-    home_chrome = os.path.join(os.path.expanduser('~'), 'chrome-bin', 'chrome')
-    if os.path.exists(home_chrome):
-        logger.info(f"Using Chrome binary at: {home_chrome}")
-        return home_chrome
-    
-    # Check for Chrome in the headless-chromium format from ChromeDP
+    """Get Chrome path on Render - prioritizing headless-chromium binary"""
+    # First check for headless-chromium from Sparticuz in the home directory
     home_chrome_headless = os.path.join(os.path.expanduser('~'), 'chrome-bin', 'headless-chromium')
     if os.path.exists(home_chrome_headless):
         logger.info(f"Using Headless Chromium binary at: {home_chrome_headless}")
         return home_chrome_headless
     
+    # Next check for standard Chrome in the home directory
+    home_chrome = os.path.join(os.path.expanduser('~'), 'chrome-bin', 'chrome')
+    if os.path.exists(home_chrome):
+        logger.info(f"Using Chrome binary at: {home_chrome}")
+        return home_chrome
+    
     # Fallback to system Chrome
+    logger.warning("No custom Chrome binary found, will attempt to use system Chrome (may fail on Render)")
     return None
 
 # Helper function to get ChromeDriver path on Render
