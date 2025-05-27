@@ -469,7 +469,7 @@ class YouTubeDownloader:
                                 # Create format entry
                                 fmt_entry = {
                                     'format_id': f_item.get('format_id'), 
-                                    'resolution': res, 
+                                    'resolution': res,
                                     'fps': f_item.get('fps'), 
                                     'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 
                                     'ext': f_item.get('ext'),
@@ -684,7 +684,7 @@ class YouTubeDownloader:
                 try:
                     os.remove(temp_cookie_file_path)
                     logger.info(f"Removed temporary cookie file: {temp_cookie_file_path}")
-                except Exception as e:
+            except Exception as e:
                     logger.error(f"Error removing temporary cookie file {temp_cookie_file_path}: {e}")
 
         # API Fallback for both browser and direct yt-dlp approaches
@@ -714,25 +714,68 @@ class YouTubeDownloader:
                 video_info.setdefault('duration', duration_seconds)
                 video_info.setdefault('view_count', int(item['statistics'].get('viewCount', 0)))
                 video_info.setdefault('like_count', int(item['statistics'].get('likeCount', 0)))
+                
+                # Get thumbnails for both quality detection and thumbnails list
+                thumbnails_data = item['snippet'].get('thumbnails', {})
+                
+                # Process thumbnails if needed
                 if not video_info.get('thumbnails'): 
-                    thumbnails_data = item['snippet'].get('thumbnails', {})
                     api_thumbnails = []
                     for quality_key in ['maxres', 'standard', 'high', 'medium', 'default']:
                         if quality_key in thumbnails_data:
                             thumb = thumbnails_data[quality_key]
                             api_thumbnails.append({'url': thumb['url'], 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
                     video_info['thumbnails'] = sorted(api_thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
+                
                 video_info.setdefault('video_id', video_id)
+                
+                # Detect highest quality based on available thumbnails and definition field
+                max_quality = "SD"
+                quality_height = 480
+                
+                # Check for maxres thumbnail - YouTube provides these only for videos with 1080p or higher resolution
+                if 'maxres' in thumbnails_data:
+                    max_quality = "FULLHD"
+                    quality_height = 1080
+                
+                # Check definition from contentDetails for better resolution info
+                definition = item['contentDetails'].get('definition', 'sd')
+                if definition == 'hd':
+                    if max_quality == "SD":
+                        max_quality = "HD"
+                        quality_height = 720
+                
+                # Check for higher definition based on maxres thumbnail dimensions
+                if 'maxres' in thumbnails_data:
+                    maxres_thumb = thumbnails_data['maxres']
+                    maxres_height = maxres_thumb.get('height', 0)
+                    if maxres_height >= 2160:
+                        max_quality = "4K"
+                        quality_height = 2160
+                    elif maxres_height >= 1440:
+                        max_quality = "2K"
+                        quality_height = 1440
+                
+                # Create API formats with detailed quality information
                 api_formats = [
-                    {'format_id': 'best_video_api', 'resolution': 'Best Video Available', 'note': 'Best Video (API Fallback)', 'ext': 'mp4'},
-                    {'format_id': 'best_audio_api', 'resolution': 'Audio Only', 'note': 'Audio (API Fallback)', 'ext': 'm4a'}
+                    {
+                        'format_id': 'best_video_api', 
+                        'resolution': f'Best Video Available ({max_quality})', 
+                        'note': f'Best Video ({max_quality}) (API Fallback)', 
+                        'ext': 'mp4',
+                        'height': quality_height
+                    },
+                    {
+                        'format_id': 'best_audio_api', 
+                        'resolution': 'Audio Only', 
+                        'note': 'Audio (API Fallback)', 
+                        'ext': 'm4a'
+                    }
                 ]
-                definition = item['contentDetails'].get('definition', 'sd') 
-                api_formats[0]['resolution'] = f'Best Video Available ({definition.upper()})'
-                api_formats[0]['note'] = f'Best Video ({definition.upper()}) (API Fallback)'
+                
                 video_info['formats'] = api_formats
                 info_source = 'api'
-                logger.info(f"Fetched basic info via YouTube API for {video_id} (browser and yt-dlp fallback).")
+                logger.info(f"Fetched basic info via YouTube API for {video_id} (browser and yt-dlp fallback). Quality detected: {max_quality}")
             except requests.exceptions.RequestException as e:
                 logger.error(f"API request error (browser and yt-dlp also failed): {e}")
                 raise ValueError(f"Could not fetch video from YouTube API (browser and yt-dlp also failed): {e}")

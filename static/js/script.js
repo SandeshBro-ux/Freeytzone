@@ -82,13 +82,13 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateQualityOptions() {
         const format = formatSelect.value;
         qualitySelect.innerHTML = ''; // Clear existing options
-
+        
         if (!currentVideoInfo || !currentVideoInfo.formats || currentVideoInfo.formats.length === 0) {
             qualityContainer.classList.add('d-none');
             if (bestQualityInfo) bestQualityInfo.textContent = 'Format information unavailable.';
             return;
         }
-
+        
         const infoSource = currentVideoInfo.info_source; // 'yt-dlp' or 'api'
 
         if (format === 'video') {
@@ -96,6 +96,7 @@ document.addEventListener('DOMContentLoaded', function() {
             let videoFormats = [];
             let bestQualityText = 'Not available';
             let maxHeight = 0;
+            let maxQualityLabel = "SD";
 
             if (infoSource === 'yt-dlp' || infoSource === 'browser+yt-dlp') {
                 // Filter for actual video formats (resolution string usually like "1920x1080")
@@ -112,8 +113,26 @@ document.addEventListener('DOMContentLoaded', function() {
                             if (height > maxHeight) maxHeight = height;
                         }
                     });
-                    
+
                     // Now create the quality options with better labels
+                    // First, add the "best" option with the max quality label
+                    const bestOption = document.createElement('option');
+                    bestOption.value = 'best';
+                    
+                    // Determine quality label based on max height
+                    if (maxHeight >= 2160) maxQualityLabel = "4K";
+                    else if (maxHeight >= 1440) maxQualityLabel = "2K";
+                    else if (maxHeight >= 1080) maxQualityLabel = "Full HD";
+                    else if (maxHeight >= 720) maxQualityLabel = "HD";
+                    else maxQualityLabel = "SD";
+                    
+                    bestOption.textContent = `Best Quality Available (${maxQualityLabel})`;
+                    if (maxHeight >= 1440) {
+                        bestOption.textContent += ' ✨';
+                    }
+                    qualitySelect.appendChild(bestOption);
+                    
+                    // Add individual format options
                     videoFormats.forEach(fmt => {
                         const option = document.createElement('option');
                         option.value = fmt.format_id; // Use format_id for download request
@@ -149,17 +168,73 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (apiVideoFormat) {
                     const option = document.createElement('option');
                     option.value = apiVideoFormat.format_id;
-                    option.textContent = apiVideoFormat.resolution; // e.g., "Best Video Available (HD)"
+                    
+                    // Extract the quality from the resolution string if possible
+                    let apiQuality = apiVideoFormat.resolution;
+                    if (apiQuality) {
+                        // Try to extract from "Best Video Available (HD)" format
+                        const match = apiQuality.match(/\(([^)]+)\)/);
+                        if (match && match[1]) {
+                            const definition = match[1].toUpperCase();
+                            
+                            // Map YouTube API definitions to quality labels
+                            if (definition === 'HD') {
+                                apiQuality = 'HD Quality (720p)';
+                                bestQualityText = 'HD (720p)';
+                                maxQualityLabel = 'HD';
+                                maxHeight = 720;
+                            } else if (definition === 'FULLHD' || definition === 'FHD') {
+                                apiQuality = 'Full HD Quality (1080p)';
+                                bestQualityText = 'Full HD (1080p)';
+                                maxQualityLabel = 'Full HD';
+                                maxHeight = 1080;
+                            } else if (definition === '2K' || definition === 'QHD') {
+                                apiQuality = '2K Quality (1440p)';
+                                bestQualityText = '2K (1440p)';
+                                maxQualityLabel = '2K';
+                                maxHeight = 1440;
+                            } else if (definition === '4K' || definition === 'UHD') {
+                                apiQuality = '4K Quality (2160p)';
+                                bestQualityText = '4K (2160p)';
+                                maxQualityLabel = '4K';
+                                maxHeight = 2160;
+                            } else if (definition === '8K') {
+                                apiQuality = '8K Quality (4320p)';
+                                bestQualityText = '8K (4320p)';
+                                maxQualityLabel = '8K';
+                                maxHeight = 4320;
+                            } else if (definition === 'SD') {
+                                apiQuality = 'Standard Quality (480p)';
+                                bestQualityText = 'SD (480p)';
+                                maxQualityLabel = 'SD';
+                                maxHeight = 480;
+                            } else {
+                                apiQuality = `Best Quality (${definition})`;
+                                bestQualityText = definition;
+                                maxQualityLabel = definition;
+                            }
+                        }
+                    }
+                    
+                    option.textContent = `Best Quality Available (${maxQualityLabel})`;
+                    if (maxHeight >= 1440) {
+                        option.textContent += ' ✨';
+                    }
                     qualitySelect.appendChild(option);
-                    bestQualityText = apiVideoFormat.resolution; 
                 } else {
-                     // Handle case where even API fallback has no video format (should be rare)
+                    // Handle case where even API fallback has no video format (should be rare)
                     const audioOnlyAsVideo = currentVideoInfo.formats.find(fmt => fmt.resolution && fmt.resolution.toLowerCase().includes('audio'));
                     if(audioOnlyAsVideo){
-                         qualityContainer.classList.add('d-none'); // No video options
+                        qualityContainer.classList.add('d-none'); // No video options
                     }
                 }
             }
+
+            // Add audio option
+            const audioOption = document.createElement('option');
+            audioOption.value = 'audio';
+            audioOption.textContent = 'Audio Only (MP3)';
+            qualitySelect.appendChild(audioOption);
 
             if (qualitySelect.options.length > 0) {
                 qualitySelect.selectedIndex = 0;
@@ -183,7 +258,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     bestQualityInfo.textContent = `Downloading audio: ${audioFormat.note}.`;
                 } else if (audioFormat && audioFormat.resolution) {
                     bestQualityInfo.textContent = `Downloading audio: ${audioFormat.resolution}.`;
-                }else {
+                } else {
                     bestQualityInfo.textContent = 'Audio will be downloaded in best available quality.';
                 }
             }
