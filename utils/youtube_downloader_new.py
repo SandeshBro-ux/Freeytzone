@@ -33,10 +33,18 @@ logging.basicConfig(level=logging.DEBUG if os.environ.get('DEBUG') else logging.
 
 # Helper function to get Chrome path on Render
 def get_chrome_path():
+    # First check the home directory for the Render Chrome binary
     home_chrome = os.path.join(os.path.expanduser('~'), 'chrome-bin', 'chrome')
     if os.path.exists(home_chrome):
         logger.info(f"Using Chrome binary at: {home_chrome}")
         return home_chrome
+    
+    # Check for Chrome in the headless-chromium format from ChromeDP
+    home_chrome_headless = os.path.join(os.path.expanduser('~'), 'chrome-bin', 'headless-chromium')
+    if os.path.exists(home_chrome_headless):
+        logger.info(f"Using Headless Chromium binary at: {home_chrome_headless}")
+        return home_chrome_headless
+    
     # Fallback to system Chrome
     return None
 
@@ -48,6 +56,66 @@ def get_chromedriver_path():
         return home_chromedriver
     # Fallback to system ChromeDriver
     return None
+
+# Setup Selenium WebDriver with appropriate options for the environment
+def setup_chrome_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--single-process")
+    chrome_options.add_argument("--disable-setuid-sandbox")
+    
+    # Set custom binary path if available (for Render)
+    chrome_binary = get_chrome_path()
+    if chrome_binary:
+        chrome_options.binary_location = chrome_binary
+        logger.info(f"Set Chrome binary location to: {chrome_binary}")
+    
+    # Mimic a real browser with realistic window size
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+    
+    # Add fingerprint randomization to avoid detection
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    
+    # Add proxy if available
+    proxy_url = os.getenv('YTDLP_PROXY_URL')
+    if proxy_url:
+        chrome_options.add_argument(f'--proxy-server={proxy_url}')
+        logger.info(f"Using proxy for browser emulation: {proxy_url}")
+    else:
+        logger.info("No YTDLP_PROXY_URL. Proceeding without proxy.")
+    
+    try:
+        # First try to use the custom ChromeDriver path (for Render)
+        chromedriver_path = get_chromedriver_path()
+        if chromedriver_path:
+            service = Service(executable_path=chromedriver_path)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            logger.info("Successfully initialized Chrome with custom ChromeDriver path")
+            return driver
+        
+        # If no custom ChromeDriver, try webdriver_manager (for local development)
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            logger.info("Successfully initialized Chrome with ChromeDriverManager")
+            return driver
+        except Exception as e:
+            logger.warning(f"Failed to use ChromeDriverManager: {e}. Trying default Chrome setup.")
+            
+        # Fall back to default Chrome setup
+        driver = webdriver.Chrome(options=chrome_options)
+        logger.info("Successfully initialized Chrome with default setup")
+        return driver
+    except Exception as e:
+        logger.error(f"All Chrome initialization methods failed: {e}")
+        raise e
 
 # Utility to convert human-readable sizes (e.g., '1.23MiB') to bytes
 def parse_size(value_str, unit):
@@ -217,56 +285,12 @@ class YouTubeDownloader:
         
         try:
             logger.debug(f"Attempting to fetch info with browser emulation for {url}")
-            # Setup Chrome options for headless browser
-            chrome_options = Options()
-            chrome_options.add_argument("--headless")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--disable-extensions")
             
-            # Set custom binary path if available (for Render)
-            chrome_binary = get_chrome_path()
-            if chrome_binary:
-                chrome_options.binary_location = chrome_binary
-            
-            # Mimic a real browser with realistic window size
-            chrome_options.add_argument("--window-size=1920,1080")
-            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36")
-            
-            # Add fingerprint randomization to avoid detection
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option("useAutomationExtension", False)
-            
-            # Add proxy if available
-            proxy_url = os.getenv('YTDLP_PROXY_URL')
-            if proxy_url:
-                chrome_options.add_argument(f'--proxy-server={proxy_url}')
-                logger.info(f"Using proxy for browser emulation: {proxy_url}")
-            else:
-                logger.info("No YTDLP_PROXY_URL. Proceeding without proxy for browser.")
-            
-            # Setup Chrome driver
+            # Use our centralized Chrome setup function
+            driver = None
             try:
-                # First try to use the custom ChromeDriver path (for Render)
-                chromedriver_path = get_chromedriver_path()
-                if chromedriver_path:
-                    service = Service(executable_path=chromedriver_path)
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                    logger.info("Using custom ChromeDriver path")
-                else:
-                    # Try webdriver_manager approach (for local development)
-                    service = Service(ChromeDriverManager().install())
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                    logger.info("Using ChromeDriverManager")
-            except Exception as e:
-                logger.warning(f"Failed to use preferred ChromeDriver setup: {e}. Trying fallback.")
-                # Fall back to system ChromeDriver with basic setup
-                driver = webdriver.Chrome(options=chrome_options)
-                logger.info("Using fallback Chrome setup")
-            
-            try:
+                driver = setup_chrome_driver()
+                
                 # First visit YouTube homepage to establish a normal session
                 driver.get("https://www.youtube.com/")
                 time.sleep(random.uniform(1, 3))  # Random delay like a human
@@ -278,16 +302,21 @@ class YouTubeDownloader:
                 # Now navigate to the actual video
                 driver.get(url)
                 
-                # Wait for video to load
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.ID, "movie_player"))
-                )
+                # Wait for video to load with a longer timeout for slower environments
+                try:
+                    WebDriverWait(driver, 30).until(
+                        EC.presence_of_element_located((By.ID, "movie_player"))
+                    )
+                    logger.info("Video player loaded successfully")
+                except Exception as e:
+                    logger.warning(f"Waiting for video player timed out: {e}. Continuing anyway.")
                 
                 # Add more realistic interactions
-                time.sleep(random.uniform(1, 3))
+                time.sleep(random.uniform(2, 4))
                 
                 # Get cookies from browser session
                 cookies = driver.get_cookies()
+                logger.info(f"Retrieved {len(cookies)} cookies from browser session")
                 
                 # Create a temporary cookie file for yt-dlp
                 temp_cookie_file_path = None
@@ -316,6 +345,7 @@ class YouTubeDownloader:
                 }
                 
                 # Add proxy if available
+                proxy_url = os.getenv('YTDLP_PROXY_URL')
                 if proxy_url:
                     ydl_opts['proxy'] = proxy_url
                 
@@ -371,7 +401,9 @@ class YouTubeDownloader:
                         logger.warning(f"Browser+yt-dlp provided info but no usable formats for {url}. Falling back to API.")
             finally:
                 # Close the browser
-                driver.quit()
+                if driver:
+                    driver.quit()
+                    logger.info("Browser session closed")
                 
                 # Clean up temporary cookie file
                 if temp_cookie_file_path and os.path.exists(temp_cookie_file_path):
@@ -580,54 +612,11 @@ class YouTubeDownloader:
             # First try to get cookies from a browser session to avoid bot verification
             temp_cookie_file_path = None
             try:
-                # Setup Chrome options for headless browser
-                chrome_options = Options()
-                chrome_options.add_argument("--headless")
-                chrome_options.add_argument("--no-sandbox")
-                chrome_options.add_argument("--disable-dev-shm-usage")
-                chrome_options.add_argument("--disable-gpu")
-                chrome_options.add_argument("--disable-extensions")
-                
-                # Set custom binary path if available (for Render)
-                chrome_binary = get_chrome_path()
-                if chrome_binary:
-                    chrome_options.binary_location = chrome_binary
-                
-                # Mimic a real browser with realistic window size
-                chrome_options.add_argument("--window-size=1920,1080")
-                chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36")
-                
-                # Add fingerprint randomization to avoid detection
-                chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-                chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-                chrome_options.add_experimental_option("useAutomationExtension", False)
-                
-                # Add proxy if available
-                proxy_url = os.getenv('YTDLP_PROXY_URL')
-                if proxy_url:
-                    chrome_options.add_argument(f'--proxy-server={proxy_url}')
-                    logger.info(f"Using proxy for browser emulation in download: {proxy_url}")
-                
-                # Setup Chrome driver
+                # Use our centralized Chrome setup function
+                driver = None
                 try:
-                    # First try to use the custom ChromeDriver path (for Render)
-                    chromedriver_path = get_chromedriver_path()
-                    if chromedriver_path:
-                        service = Service(executable_path=chromedriver_path)
-                        driver = webdriver.Chrome(service=service, options=chrome_options)
-                        logger.info("Using custom ChromeDriver path for download")
-                    else:
-                        # Try webdriver_manager approach (for local development)
-                        service = Service(ChromeDriverManager().install())
-                        driver = webdriver.Chrome(service=service, options=chrome_options)
-                        logger.info("Using ChromeDriverManager for download")
-                except Exception as e:
-                    logger.warning(f"Failed to use preferred ChromeDriver setup for download: {e}. Trying fallback.")
-                    # Fall back to system ChromeDriver with basic setup
-                    driver = webdriver.Chrome(options=chrome_options)
-                    logger.info("Using fallback Chrome setup for download")
-                
-                try:
+                    driver = setup_chrome_driver()
+                    
                     # First visit YouTube homepage to establish a normal session
                     driver.get("https://www.youtube.com/")
                     time.sleep(random.uniform(1, 3))  # Random delay like a human
@@ -639,16 +628,21 @@ class YouTubeDownloader:
                     # Now navigate to the actual video
                     driver.get(url)
                     
-                    # Wait for video to load
-                    WebDriverWait(driver, 20).until(
-                        EC.presence_of_element_located((By.ID, "movie_player"))
-                    )
+                    # Wait for video to load with a longer timeout for slower environments
+                    try:
+                        WebDriverWait(driver, 30).until(
+                            EC.presence_of_element_located((By.ID, "movie_player"))
+                        )
+                        logger.info("Video player loaded successfully for download")
+                    except Exception as e:
+                        logger.warning(f"Waiting for video player timed out in download: {e}. Continuing anyway.")
                     
                     # Add more realistic interactions
-                    time.sleep(random.uniform(1, 3))
+                    time.sleep(random.uniform(2, 4))
                     
                     # Get cookies from browser session
                     cookies = driver.get_cookies()
+                    logger.info(f"Retrieved {len(cookies)} cookies from browser session for download")
                     
                     # Create a temporary cookie file for yt-dlp
                     with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as tmp_cookie_file:
@@ -666,7 +660,9 @@ class YouTubeDownloader:
                         logger.info(f"Created cookie file from browser session for download: {temp_cookie_file_path}")
                 finally:
                     # Close the browser
-                    driver.quit()
+                    if driver:
+                        driver.quit()
+                        logger.info("Browser session closed for download")
             except Exception as e:
                 logger.error(f"Browser emulation failed for download {download_id}: {e}. Will try without browser cookies.")
                 temp_cookie_file_path = None

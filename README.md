@@ -43,7 +43,7 @@ A powerful YouTube downloader web application with 2K video quality support, MP3
 - requests
 - selenium
 - webdriver-manager
-- Chrome/Chromium and ChromeDriver (installed by build script)
+- ChromeDriver and headless Chrome (auto-installed by build script)
 
 ## Deployment on Render
 
@@ -56,6 +56,20 @@ A powerful YouTube downloader web application with 2K video quality support, MP3
      - `FFMPEG_PATH`: `/usr/bin/ffmpeg` (optional)
      - `YOUTUBE_API_KEY`: Your YouTube API key (optional, for fallback)
      - `YTDLP_PROXY_URL`: Your proxy URL (optional, for additional layer of protection)
+
+### How the Render Deployment Works
+
+This application uses a custom approach to run headless Chrome in Render's environment:
+
+1. The `build.sh` script automatically downloads:
+   - A portable version of Chromium specifically designed for serverless environments
+   - A compatible version of ChromeDriver
+   
+2. Both binaries are installed in the user's home directory (`$HOME/chrome-bin`)
+
+3. The application detects these binaries and uses them for browser emulation, which enables:
+   - YouTube bot verification bypass without requiring system-level Chrome installation
+   - Reliable operation in Render's read-only file system environment
 
 ## Usage Notes
 
