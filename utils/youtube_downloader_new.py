@@ -5,7 +5,6 @@ import logging
 import subprocess
 import threading
 import time
-import datetime
 import random
 import shutil
 from urllib.parse import urlparse, parse_qs
@@ -162,11 +161,15 @@ def setup_chrome_driver():
 
 # Utility to convert human-readable sizes (e.g., '1.23MiB') to bytes
 def parse_size(value_str, unit):
+    """Convert human-readable sizes to bytes"""
     v = float(value_str)
     unit = unit.lower()
-    if unit == 'kib': return v * 1024
-    if unit == 'mib': return v * 1024**2
-    if unit == 'gib': return v * 1024**3
+    if unit == 'kib': 
+        return v * 1024
+    if unit == 'mib': 
+        return v * 1024**2
+    if unit == 'gib': 
+        return v * 1024**3
     return v
 
 class YouTubeDownloader:
@@ -436,23 +439,71 @@ class YouTubeDownloader:
                                     'ext': best_audio.get('ext'), 'note': best_audio.get('format_note', 'Best Audio')
                                 })
                         
-                        # Process video formats
+                        # Process video formats with improved resolution detection
                         video_only_formats = []
                         merged_formats = []
+                        
+                        # First pass to identify all available formats
                         for f_item in raw_formats:
                             if f_item.get('vcodec') != 'none':
-                                res = f_item.get('resolution') or (f"{f_item.get('width')}x{f_item.get('height')}" if f_item.get('width') and f_item.get('height') else None)
-                                if not res: continue
+                                # Get resolution in consistent format
+                                width = f_item.get('width')
+                                height = f_item.get('height')
+                                
+                                if not width or not height:
+                                    # Try to extract from resolution string
+                                    resolution_str = f_item.get('resolution')
+                                    if resolution_str and 'x' in resolution_str:
+                                        try:
+                                            width_str, height_str = resolution_str.split('x')
+                                            width = int(width_str)
+                                            height = int(height_str)
+                                        except (ValueError, TypeError):
+                                            continue
+                                    else:
+                                        continue
+                                
+                                # Format resolution consistently
+                                res = f"{width}x{height}"
+                                
+                                # Create format entry
                                 fmt_entry = {
-                                    'format_id': f_item.get('format_id'), 'resolution': res, 'fps': f_item.get('fps'), 
-                                    'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 'ext': f_item.get('ext'),
-                                    'note': f_item.get('format_note', res)
+                                    'format_id': f_item.get('format_id'), 
+                                    'resolution': res, 
+                                    'fps': f_item.get('fps'), 
+                                    'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 
+                                    'ext': f_item.get('ext'),
+                                    'note': f_item.get('format_note', f"{height}p"),
+                                    'width': width,
+                                    'height': height
                                 }
-                                if f_item.get('acodec') != 'none': merged_formats.append(fmt_entry)
-                                else: video_only_formats.append(fmt_entry)
+                                
+                                # Categorize as video-only or merged format
+                                if f_item.get('acodec') != 'none': 
+                                    merged_formats.append(fmt_entry)
+                                else: 
+                                    video_only_formats.append(fmt_entry)
                         
-                        processed_video_formats = sorted(merged_formats + video_only_formats, 
-                            key=lambda x: (int(x['resolution'].split('x')[1]), x.get('fps', 0)), reverse=True)
+                        # Create categorized formats list with proper quality labeling
+                        processed_video_formats = []
+                        
+                        # Add merged formats first (these have audio built-in)
+                        if merged_formats:
+                            # Sort by height and fps
+                            sorted_merged = sorted(merged_formats, 
+                                key=lambda x: (x.get('height', 0), x.get('fps', 0)), 
+                                reverse=True)
+                            processed_video_formats.extend(sorted_merged)
+                        
+                        # Add video-only formats 
+                        if video_only_formats:
+                            # Sort by height and fps
+                            sorted_video_only = sorted(video_only_formats, 
+                                key=lambda x: (x.get('height', 0), x.get('fps', 0)), 
+                                reverse=True)
+                            processed_video_formats.extend(sorted_video_only)
+                        
+                        # Extend the main formats list
                         processed_formats.extend(processed_video_formats)
                         
                         if processed_formats:
@@ -549,22 +600,74 @@ class YouTubeDownloader:
                             'filesize': best_audio.get('filesize') or best_audio.get('filesize_approx'),
                             'ext': best_audio.get('ext'), 'note': best_audio.get('format_note', 'Best Audio')
                         })
+                
+                # Process video formats with improved resolution detection
                 video_only_formats = []
                 merged_formats = []
+                
+                # First pass to identify all available formats
                 for f_item in raw_formats:
                     if f_item.get('vcodec') != 'none':
-                        res = f_item.get('resolution') or (f"{f_item.get('width')}x{f_item.get('height')}" if f_item.get('width') and f_item.get('height') else None)
-                        if not res: continue
+                        # Get resolution in consistent format
+                        width = f_item.get('width')
+                        height = f_item.get('height')
+                        
+                        if not width or not height:
+                            # Try to extract from resolution string
+                            resolution_str = f_item.get('resolution')
+                            if resolution_str and 'x' in resolution_str:
+                                try:
+                                    width_str, height_str = resolution_str.split('x')
+                                    width = int(width_str)
+                                    height = int(height_str)
+                                except (ValueError, TypeError):
+                                    continue
+                            else:
+                                continue
+                        
+                        # Format resolution consistently
+                        res = f"{width}x{height}"
+                        
+                        # Create format entry
                         fmt_entry = {
-                            'format_id': f_item.get('format_id'), 'resolution': res, 'fps': f_item.get('fps'), 
-                            'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 'ext': f_item.get('ext'),
-                            'note': f_item.get('format_note', res)
+                            'format_id': f_item.get('format_id'), 
+                            'resolution': res, 
+                            'fps': f_item.get('fps'), 
+                            'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 
+                            'ext': f_item.get('ext'),
+                            'note': f_item.get('format_note', f"{height}p"),
+                            'width': width,
+                            'height': height
                         }
-                        if f_item.get('acodec') != 'none': merged_formats.append(fmt_entry)
-                        else: video_only_formats.append(fmt_entry)
-                processed_video_formats = sorted(merged_formats + video_only_formats, 
-                    key=lambda x: (int(x['resolution'].split('x')[1]), x.get('fps', 0)), reverse=True)
+                        
+                        # Categorize as video-only or merged format
+                        if f_item.get('acodec') != 'none': 
+                            merged_formats.append(fmt_entry)
+                        else: 
+                            video_only_formats.append(fmt_entry)
+                
+                # Create categorized formats list with proper quality labeling
+                processed_video_formats = []
+                
+                # Add merged formats first (these have audio built-in)
+                if merged_formats:
+                    # Sort by height and fps
+                    sorted_merged = sorted(merged_formats, 
+                        key=lambda x: (x.get('height', 0), x.get('fps', 0)), 
+                        reverse=True)
+                    processed_video_formats.extend(sorted_merged)
+                
+                # Add video-only formats 
+                if video_only_formats:
+                    # Sort by height and fps
+                    sorted_video_only = sorted(video_only_formats, 
+                        key=lambda x: (x.get('height', 0), x.get('fps', 0)), 
+                        reverse=True)
+                    processed_video_formats.extend(sorted_video_only)
+                
+                # Extend the main formats list
                 processed_formats.extend(processed_video_formats)
+                
                 if processed_formats:
                     video_info['formats'] = processed_formats
                     detailed_formats_available = True
@@ -1267,7 +1370,8 @@ class YouTubeDownloader:
                         speed_part = raw_line.split('at')[-1].split('ETA')[0].strip()
                         if '/s' in speed_part:
                             speed = speed_part
-                    except:
+                    except Exception as speed_parse_error:
+                        logger.debug(f"Error parsing speed: {speed_parse_error}")
                         pass  # Keep current speed if parsing fails
                         
                 logger.debug(f"Direct parsing from raw line: progress={progress}, speed={speed}, eta={eta}")
@@ -1370,3 +1474,71 @@ class YouTubeDownloader:
         self._save_downloads()
                 
         return True
+
+    def cleanup_old_downloads(self, max_age_seconds=3600):
+        """Clean up old download directories and entries"""
+        try:
+            current_time = time.time()
+            expired_ids = []
+            
+            # Identify expired downloads
+            for download_id, download_info in self.downloads.items():
+                start_time = download_info.get('start_time', 0)
+                age = current_time - start_time
+                
+                if age > max_age_seconds:
+                    expired_ids.append(download_id)
+            
+            # Remove expired downloads
+            for download_id in expired_ids:
+                download_path = os.path.join(self.temp_dir, download_id)
+                try:
+                    if os.path.exists(download_path):
+                        if os.path.isdir(download_path):
+                            # Use os.rmdir for directories or manually remove files as fallback
+                            try:
+                                for root, dirs, files in os.walk(download_path, topdown=False):
+                                    for file in files:
+                                        os.remove(os.path.join(root, file))
+                                    for dir in dirs:
+                                        os.rmdir(os.path.join(root, dir))
+                                os.rmdir(download_path)
+                            except Exception as e:
+                                logger.error(f"Error recursively removing directory: {str(e)}")
+                        else:
+                            os.remove(download_path)
+                    del self.downloads[download_id]
+                    logger.debug(f"Cleaned up expired download: {download_id}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up download {download_id}: {str(e)}")
+            
+            # Save updated state
+            if expired_ids:
+                self._save_downloads()
+                
+            return len(expired_ids)
+        except Exception as e:
+            logger.error(f"Error in cleanup_old_downloads: {str(e)}")
+            return 0
+
+    def auto_clean_empty_directories(self):
+        """Auto-clean empty directories"""
+        try:
+            # Find all empty directories in the temp_dir
+            empty_dirs = []
+            for root, _, files in os.walk(self.temp_dir):
+                if not files:
+                    empty_dirs.append(root)
+            
+            # Remove empty directories
+            for empty_dir in empty_dirs:
+                try:
+                    os.rmdir(empty_dir)
+                    logger.debug(f"Removed empty directory: {empty_dir}")
+                except Exception as e:
+                    logger.error(f"Error removing empty directory: {str(e)}")
+            
+            return len(empty_dirs)
+        except Exception as e:
+            logger.error(f"Error auto-cleaning empty directories: {str(e)}")
+            return 0

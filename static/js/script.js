@@ -95,8 +95,9 @@ document.addEventListener('DOMContentLoaded', function() {
             qualityContainer.classList.remove('d-none');
             let videoFormats = [];
             let bestQualityText = 'Not available';
+            let maxHeight = 0;
 
-            if (infoSource === 'yt-dlp') {
+            if (infoSource === 'yt-dlp' || infoSource === 'browser+yt-dlp') {
                 // Filter for actual video formats (resolution string usually like "1920x1080")
                 // and exclude audio-only which might have a "resolution" field saying "Audio Only"
                 videoFormats = currentVideoInfo.formats.filter(fmt => 
@@ -104,24 +105,44 @@ document.addEventListener('DOMContentLoaded', function() {
                 );
 
                 if (videoFormats.length > 0) {
-                    // First format is usually the best quality due to backend sorting
-                    const bestFormat = videoFormats[0];
-                    const height = bestFormat.resolution.split('x')[1];
-                    bestQualityText = `${height}p`; 
-                    if (bestFormat.fps) bestQualityText += ` ${bestFormat.fps}fps`;
-                    if (parseInt(height) >= 2160) bestQualityText = `4K (${bestQualityText})`;
-                    else if (parseInt(height) >= 1440) bestQualityText = `2K (${bestQualityText})`;
-
+                    // First find the max resolution available
+                    videoFormats.forEach(fmt => {
+                        if (fmt.resolution && fmt.resolution.includes('x')) {
+                            const height = parseInt(fmt.resolution.split('x')[1]);
+                            if (height > maxHeight) maxHeight = height;
+                        }
+                    });
+                    
+                    // Now create the quality options with better labels
                     videoFormats.forEach(fmt => {
                         const option = document.createElement('option');
                         option.value = fmt.format_id; // Use format_id for download request
-                        let label = fmt.resolution;
-                        if (fmt.fps) label += ` ${fmt.fps}fps`;
-                        if (fmt.note && fmt.note !== fmt.resolution) label += ` (${fmt.note})`;
+                        
+                        // Extract height from resolution (e.g., 1920x1080 -> 1080)
+                        const height = parseInt(fmt.resolution.split('x')[1]);
+                        
+                        // Create a more user-friendly label with resolution type (4K, 2K, HD)
+                        let qualityLabel = '';
+                        if (height >= 2160) qualityLabel = '4K';
+                        else if (height >= 1440) qualityLabel = '2K';
+                        else if (height >= 1080) qualityLabel = 'Full HD';
+                        else if (height >= 720) qualityLabel = 'HD';
+                        else qualityLabel = 'SD';
+                        
+                        let label = `${qualityLabel} (${height}p)`;
+                        if (fmt.fps && fmt.fps > 30) label += ` ${fmt.fps}fps`;
                         if (fmt.ext) label += ` - ${fmt.ext}`;
+                        
                         option.textContent = label;
                         qualitySelect.appendChild(option);
                     });
+                    
+                    // Set the best quality text based on max height
+                    if (maxHeight >= 2160) bestQualityText = '4K (2160p)';
+                    else if (maxHeight >= 1440) bestQualityText = '2K (1440p)';
+                    else if (maxHeight >= 1080) bestQualityText = 'Full HD (1080p)';
+                    else if (maxHeight >= 720) bestQualityText = 'HD (720p)';
+                    else bestQualityText = `${maxHeight}p`;
                 }
             } else { // API fallback or unknown source
                 const apiVideoFormat = currentVideoInfo.formats.find(fmt => fmt.format_id && fmt.format_id.startsWith('best_video'));
@@ -142,7 +163,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (qualitySelect.options.length > 0) {
                 qualitySelect.selectedIndex = 0;
-                if (bestQualityInfo) bestQualityInfo.textContent = `The best video quality available is ${bestQualityText}.`;
+                if (bestQualityInfo) bestQualityInfo.textContent = `Maximum quality available: ${bestQualityText}`;
+                // If 2K or 4K is available, highlight it
+                if (maxHeight >= 1440) {
+                    bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${bestQualityText} available!</strong>`;
+                }
             } else {
                 qualityContainer.classList.add('d-none');
                 if (bestQualityInfo) bestQualityInfo.textContent = 'No video quality options found.';
