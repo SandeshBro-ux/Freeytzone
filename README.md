@@ -43,14 +43,14 @@ A powerful YouTube downloader web application with 2K video quality support, MP3
 - requests
 - selenium
 - webdriver-manager
-- Chrome/Chromium and ChromeDriver (installed automatically on Render)
+- Chrome/Chromium and ChromeDriver (installed by build script)
 
 ## Deployment on Render
 
 1. Create a new Web Service on Render
 2. Connect your GitHub repository
 3. Configure the service with:
-   - **Build Command**: `chmod +x render_setup.sh && ./render_setup.sh && pip install -r requirements.txt`
+   - **Build Command**: `chmod +x build.sh && ./build.sh`
    - **Start Command**: `gunicorn app:app`
    - **Environment Variables**:
      - `FFMPEG_PATH`: `/usr/bin/ffmpeg` (optional)

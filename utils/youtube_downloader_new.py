@@ -31,6 +31,24 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG if os.environ.get('DEBUG') else logging.INFO)  # Set to DEBUG for detailed logs
 
+# Helper function to get Chrome path on Render
+def get_chrome_path():
+    home_chrome = os.path.join(os.path.expanduser('~'), 'chrome-bin', 'chrome')
+    if os.path.exists(home_chrome):
+        logger.info(f"Using Chrome binary at: {home_chrome}")
+        return home_chrome
+    # Fallback to system Chrome
+    return None
+
+# Helper function to get ChromeDriver path on Render
+def get_chromedriver_path():
+    home_chromedriver = os.path.join(os.path.expanduser('~'), 'chrome-bin', 'chromedriver')
+    if os.path.exists(home_chromedriver):
+        logger.info(f"Using ChromeDriver binary at: {home_chromedriver}")
+        return home_chromedriver
+    # Fallback to system ChromeDriver
+    return None
+
 # Utility to convert human-readable sizes (e.g., '1.23MiB') to bytes
 def parse_size(value_str, unit):
     v = float(value_str)
@@ -204,6 +222,13 @@ class YouTubeDownloader:
             chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-extensions")
+            
+            # Set custom binary path if available (for Render)
+            chrome_binary = get_chrome_path()
+            if chrome_binary:
+                chrome_options.binary_location = chrome_binary
             
             # Mimic a real browser with realistic window size
             chrome_options.add_argument("--window-size=1920,1080")
@@ -224,13 +249,22 @@ class YouTubeDownloader:
             
             # Setup Chrome driver
             try:
-                # First try webdriver_manager approach (for environments where it works)
-                service = Service(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=chrome_options)
+                # First try to use the custom ChromeDriver path (for Render)
+                chromedriver_path = get_chromedriver_path()
+                if chromedriver_path:
+                    service = Service(executable_path=chromedriver_path)
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    logger.info("Using custom ChromeDriver path")
+                else:
+                    # Try webdriver_manager approach (for local development)
+                    service = Service(ChromeDriverManager().install())
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    logger.info("Using ChromeDriverManager")
             except Exception as e:
-                logger.warning(f"Failed to use webdriver_manager: {e}. Trying system ChromeDriver.")
-                # Fall back to system ChromeDriver
+                logger.warning(f"Failed to use preferred ChromeDriver setup: {e}. Trying fallback.")
+                # Fall back to system ChromeDriver with basic setup
                 driver = webdriver.Chrome(options=chrome_options)
+                logger.info("Using fallback Chrome setup")
             
             try:
                 # First visit YouTube homepage to establish a normal session
@@ -551,6 +585,13 @@ class YouTubeDownloader:
                 chrome_options.add_argument("--headless")
                 chrome_options.add_argument("--no-sandbox")
                 chrome_options.add_argument("--disable-dev-shm-usage")
+                chrome_options.add_argument("--disable-gpu")
+                chrome_options.add_argument("--disable-extensions")
+                
+                # Set custom binary path if available (for Render)
+                chrome_binary = get_chrome_path()
+                if chrome_binary:
+                    chrome_options.binary_location = chrome_binary
                 
                 # Mimic a real browser with realistic window size
                 chrome_options.add_argument("--window-size=1920,1080")
@@ -569,13 +610,22 @@ class YouTubeDownloader:
                 
                 # Setup Chrome driver
                 try:
-                    # First try webdriver_manager approach
-                    service = Service(ChromeDriverManager().install())
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    # First try to use the custom ChromeDriver path (for Render)
+                    chromedriver_path = get_chromedriver_path()
+                    if chromedriver_path:
+                        service = Service(executable_path=chromedriver_path)
+                        driver = webdriver.Chrome(service=service, options=chrome_options)
+                        logger.info("Using custom ChromeDriver path for download")
+                    else:
+                        # Try webdriver_manager approach (for local development)
+                        service = Service(ChromeDriverManager().install())
+                        driver = webdriver.Chrome(service=service, options=chrome_options)
+                        logger.info("Using ChromeDriverManager for download")
                 except Exception as e:
-                    logger.warning(f"Failed to use webdriver_manager: {e}. Trying system ChromeDriver.")
-                    # Fall back to system ChromeDriver
+                    logger.warning(f"Failed to use preferred ChromeDriver setup for download: {e}. Trying fallback.")
+                    # Fall back to system ChromeDriver with basic setup
                     driver = webdriver.Chrome(options=chrome_options)
+                    logger.info("Using fallback Chrome setup for download")
                 
                 try:
                     # First visit YouTube homepage to establish a normal session
