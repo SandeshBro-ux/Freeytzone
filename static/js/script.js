@@ -35,6 +35,138 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentDownloadId = null;
     let progressInterval = null;
     
+    // Global variable to hold the YouTube IFrame API player instance
+    let iframeApiPlayer = null;
+    // Global variable to store the max quality label detected by the IFrame API
+    let detectedMaxQualityLabelFromIframe = null;
+
+    // Promise that resolves when the YouTube IFrame API is ready
+    const youtubeApiReadyPromise = new Promise(resolve => {
+        if (typeof YT !== 'undefined' && YT.Player) {
+            resolve(); // Already loaded
+        } else {
+            // This function will be called automatically by the YouTube IFrame API script
+            window.onYouTubeIframeAPIReady = () => {
+                resolve();
+            };
+        }
+    });
+
+    // Helper function to destroy the existing iframe player
+    function destroyIframePlayer() {
+        if (iframeApiPlayer) {
+            try {
+                iframeApiPlayer.stopVideo(); // Stop playback
+                iframeApiPlayer.destroy();   // Destroy the player instance
+            } catch (e) {
+                console.error("Error destroying iframe player:", e);
+            }
+            iframeApiPlayer = null;
+        }
+        // Clear the container in case of leftover elements, though destroy() should handle it
+        const playerContainer = document.getElementById('iframe-player-container');
+        if (playerContainer) {
+            playerContainer.innerHTML = ''; 
+        }
+    }
+
+    // Function to get video quality using the IFrame API
+    function getQualityViaIframeAPI(videoId) {
+        return new Promise(async (resolve, reject) => {
+            await youtubeApiReadyPromise; // Ensure API is ready
+
+            destroyIframePlayer(); // Clean up any previous player
+
+            const timeoutDuration = 15000; // 15 seconds timeout for quality detection
+            let qualityDetectionTimeout = setTimeout(() => {
+                console.warn('YouTube IFrame API quality detection timed out.');
+                destroyIframePlayer();
+                reject('timeout');
+            }, timeoutDuration);
+
+            try {
+                iframeApiPlayer = new YT.Player('iframe-player-container', {
+                    height: '0', // Invisible
+                    width: '0',  // Invisible
+                    videoId: videoId,
+                    playerVars: {
+                        autoplay: 1,
+                        mute: 1,
+                        controls: 0, // No controls
+                        disablekb: 1, // Disable keyboard controls
+                        fs: 0, // No fullscreen button
+                        iv_load_policy: 3, // Don't show annotations
+                        modestbranding: 1, // Minimal YouTube branding
+                        playsinline: 1 // Play inline on iOS
+                    },
+                    events: {
+                        'onReady': function(event) {
+                            // Player is ready, but we need to wait for 'playing' state
+                            // Mute again just in case, though playerVar should handle it
+                            event.target.mute(); 
+                        },
+                        'onStateChange': function(event) {
+                            // YT.PlayerState.PLAYING is 1
+                            if (event.data === YT.PlayerState.PLAYING) {
+                                // Short delay to allow quality levels to populate
+                                setTimeout(() => {
+                                    if (!iframeApiPlayer) return; // Player might have been destroyed by timeout
+
+                                    const levels = iframeApiPlayer.getAvailableQualityLevels();
+                                    clearTimeout(qualityDetectionTimeout); // Clear the main timeout
+
+                                    if (levels && levels.length > 0) {
+                                        const maxQuality = levels[0]; // Highest quality is usually first
+                                        console.log('Max Quality via IFrame API:', maxQuality);
+                                        destroyIframePlayer();
+                                        resolve(maxQuality); // e.g., "hd1080", "hd1440"
+                                    } else {
+                                        console.warn('No quality levels found via IFrame API.');
+                                        destroyIframePlayer();
+                                        resolve(null); // Resolve with null if no levels found
+                                    }
+                                }, 750); // Increased delay slightly
+                            }
+                        },
+                        'onError': function(event) {
+                            clearTimeout(qualityDetectionTimeout);
+                            console.error('YouTube IFrame API Player Error:', event.data);
+                            destroyIframePlayer();
+                            reject('player_error_' + event.data);
+                        }
+                    }
+                });
+            } catch (error) {
+                clearTimeout(qualityDetectionTimeout);
+                console.error("Error initializing IFrame API player:", error);
+                destroyIframePlayer();
+                reject('init_error');
+            }
+        });
+    }
+
+    // Helper function to map YouTube API quality levels to friendly names
+    function mapQualityToFriendlyName(qualityLevel) {
+        if (!qualityLevel) return "Unknown";
+        switch (qualityLevel) {
+            case 'highres': return '8K'; // Or dynamically get resolution if possible
+            case 'hd2880': return '5K';
+            case 'hd2160': return '4K';
+            case 'hd1440': return '2K';
+            case 'hd1080': return 'Full HD';
+            case 'hd720': return 'HD';
+            case 'large': return '480p'; // SD
+            case 'medium': return '360p'; // SD
+            case 'small': return '240p'; // SD
+            case 'tiny': return '144p'; // SD
+            default:
+                if (qualityLevel.startsWith('hd') && parseInt(qualityLevel.substring(2)) > 0) {
+                    return qualityLevel.substring(2) + 'p';
+                }
+                return qualityLevel.charAt(0).toUpperCase() + qualityLevel.slice(1); // Capitalize
+        }
+    }
+
     // Format duration from seconds to MM:SS or HH:MM:SS
     function formatDuration(seconds) {
         if (!seconds) return '0:00';
@@ -85,167 +217,142 @@ document.addEventListener('DOMContentLoaded', function() {
         
         if (!currentVideoInfo || !currentVideoInfo.formats || currentVideoInfo.formats.length === 0) {
             qualityContainer.classList.add('d-none');
-            if (bestQualityInfo) bestQualityInfo.textContent = 'Format information unavailable.';
+            // Use the iframe detected quality for the main display text if available
+            if (bestQualityInfo) {
+                if (detectedMaxQualityLabelFromIframe) {
+                    bestQualityInfo.textContent = `Max quality (IFrame): ${detectedMaxQualityLabelFromIframe}. No specific download formats found yet.`;
+                } else {
+                    bestQualityInfo.textContent = 'Format information unavailable.';
+                }
+            }
+            // Add a default best option even if formats are missing, using iframe quality
+            const bestFallbackOption = document.createElement('option');
+            bestFallbackOption.value = 'best';
+            bestFallbackOption.textContent = detectedMaxQualityLabelFromIframe 
+                ? `Best Quality Available (${detectedMaxQualityLabelFromIframe})` 
+                : 'Best Quality Available';
+            if (detectedMaxQualityLabelFromIframe && (detectedMaxQualityLabelFromIframe.includes('2K') || detectedMaxQualityLabelFromIframe.includes('4K'))) {
+                bestFallbackOption.textContent += ' ✨';
+            }
+            qualitySelect.appendChild(bestFallbackOption);
+            
+            // Add audio only as a fallback too
+            const audioFallbackOption = document.createElement('option');
+            audioFallbackOption.value = 'audio';
+            audioFallbackOption.textContent = 'Audio Only (MP3)';
+            qualitySelect.appendChild(audioFallbackOption);
+            
+            if (qualitySelect.options.length > 0) qualitySelect.selectedIndex = 0;
             return;
         }
         
-        const infoSource = currentVideoInfo.info_source; // 'yt-dlp' or 'api'
+        const infoSource = currentVideoInfo.info_source; 
 
         if (format === 'video') {
             qualityContainer.classList.remove('d-none');
             let videoFormats = [];
-            let bestQualityText = 'Not available';
-            let maxHeight = 0;
-            let maxQualityLabel = "SD";
+            let bestQualityText = detectedMaxQualityLabelFromIframe || 'Not available'; // Prioritize iframe detection
+            let maxHeight = 0; 
+            // Use iframe quality if available, otherwise calculate from formats
+            let maxQualityLabel = detectedMaxQualityLabelFromIframe || "SD"; 
 
             if (infoSource === 'yt-dlp' || infoSource === 'browser+yt-dlp') {
-                // Filter for actual video formats (resolution string usually like "1920x1080")
-                // and exclude audio-only which might have a "resolution" field saying "Audio Only"
                 videoFormats = currentVideoInfo.formats.filter(fmt => 
                     fmt.resolution && fmt.resolution.includes('x') && !fmt.resolution.toLowerCase().includes('audio')
                 );
 
-                if (videoFormats.length > 0) {
-                    // First find the max resolution available
+                if (videoFormats.length > 0 && !detectedMaxQualityLabelFromIframe) { // Only recalculate if iframe didn't provide it
                     videoFormats.forEach(fmt => {
                         if (fmt.resolution && fmt.resolution.includes('x')) {
                             const height = parseInt(fmt.resolution.split('x')[1]);
                             if (height > maxHeight) maxHeight = height;
                         }
                     });
-
-                    // Now create the quality options with better labels
-                    // First, add the "best" option with the max quality label
-                    const bestOption = document.createElement('option');
-                    bestOption.value = 'best';
-                    
-                    // Determine quality label based on max height
                     if (maxHeight >= 2160) maxQualityLabel = "4K";
                     else if (maxHeight >= 1440) maxQualityLabel = "2K";
                     else if (maxHeight >= 1080) maxQualityLabel = "Full HD";
                     else if (maxHeight >= 720) maxQualityLabel = "HD";
                     else maxQualityLabel = "SD";
-                    
-                    bestOption.textContent = `Best Quality Available (${maxQualityLabel})`;
-                    if (maxHeight >= 1440) {
-                        bestOption.textContent += ' ✨';
-                    }
-                    qualitySelect.appendChild(bestOption);
-                    
-                    // Add individual format options
-                    videoFormats.forEach(fmt => {
-                        const option = document.createElement('option');
-                        option.value = fmt.format_id; // Use format_id for download request
-                        
-                        // Extract height from resolution (e.g., 1920x1080 -> 1080)
-                        const height = parseInt(fmt.resolution.split('x')[1]);
-                        
-                        // Create a more user-friendly label with resolution type (4K, 2K, HD)
-                        let qualityLabel = '';
-                        if (height >= 2160) qualityLabel = '4K';
-                        else if (height >= 1440) qualityLabel = '2K';
-                        else if (height >= 1080) qualityLabel = 'Full HD';
-                        else if (height >= 720) qualityLabel = 'HD';
-                        else qualityLabel = 'SD';
-                        
-                        let label = `${qualityLabel} (${height}p)`;
-                        if (fmt.fps && fmt.fps > 30) label += ` ${fmt.fps}fps`;
-                        if (fmt.ext) label += ` - ${fmt.ext}`;
-                        
-                        option.textContent = label;
-                        qualitySelect.appendChild(option);
-                    });
-                    
-                    // Set the best quality text based on max height
-                    if (maxHeight >= 2160) bestQualityText = '4K (2160p)';
-                    else if (maxHeight >= 1440) bestQualityText = '2K (1440p)';
-                    else if (maxHeight >= 1080) bestQualityText = 'Full HD (1080p)';
-                    else if (maxHeight >= 720) bestQualityText = 'HD (720p)';
-                    else bestQualityText = `${maxHeight}p`;
+                } else if (detectedMaxQualityLabelFromIframe) {
+                    // If iframe provided quality, map it to a numeric height for consistency if needed later
+                    // This part might be optional if maxQualityLabel is already sufficient
+                    if (maxQualityLabel === "4K") maxHeight = 2160;
+                    else if (maxQualityLabel === "2K") maxHeight = 1440;
+                    else if (maxQualityLabel === "Full HD") maxHeight = 1080;
+                    else if (maxQualityLabel === "HD") maxHeight = 720;
+                    // ... and so on for other labels if you need maxHeight numerically
                 }
+                
+                const bestOption = document.createElement('option');
+                bestOption.value = 'best';
+                bestOption.textContent = `Best Quality Available (${maxQualityLabel})`;
+                if (['4K', '2K'].includes(maxQualityLabel) || maxHeight >=1440) { // Check both label and derived height
+                    bestOption.textContent += ' ✨';
+                }
+                qualitySelect.appendChild(bestOption);
+                
+                // Ensure this part still works and sorts correctly
+                videoFormats.sort((a, b) => { // Sort by height, then fps
+                    const heightA = parseInt(a.resolution.split('x')[1]);
+                    const heightB = parseInt(b.resolution.split('x')[1]);
+                    if (heightB !== heightA) return heightB - heightA;
+                    return (b.fps || 0) - (a.fps || 0);
+                });
+
+                videoFormats.forEach(fmt => {
+                    const option = document.createElement('option');
+                    option.value = fmt.format_id; // Use format_id for download request
+                    
+                    // Extract height from resolution (e.g., 1920x1080 -> 1080)
+                    const height = parseInt(fmt.resolution.split('x')[1]);
+                    
+                    // Create a more user-friendly label with resolution type (4K, 2K, HD)
+                    let qualityLabel = '';
+                    if (height >= 2160) qualityLabel = '4K';
+                    else if (height >= 1440) qualityLabel = '2K';
+                    else if (height >= 1080) qualityLabel = 'Full HD';
+                    else if (height >= 720) qualityLabel = 'HD';
+                    else qualityLabel = 'SD';
+                    
+                    let label = `${qualityLabel} (${height}p)`;
+                    if (fmt.fps && fmt.fps > 30) label += ` ${fmt.fps}fps`;
+                    if (fmt.ext) label += ` - ${fmt.ext}`;
+                    
+                    option.textContent = label;
+                    qualitySelect.appendChild(option);
+                });
+
             } else { // API fallback or unknown source
                 const apiVideoFormat = currentVideoInfo.formats.find(fmt => fmt.format_id && fmt.format_id.startsWith('best_video'));
                 if (apiVideoFormat) {
                     const option = document.createElement('option');
-                    option.value = apiVideoFormat.format_id;
-                    
-                    // Extract the quality from the resolution string if possible
-                    let apiQuality = apiVideoFormat.resolution;
-                    if (apiQuality) {
-                        // Try to extract from "Best Video Available (HD)" format
-                        const match = apiQuality.match(/\(([^)]+)\)/);
-                        if (match && match[1]) {
-                            const definition = match[1].toUpperCase();
-                            
-                            // Map YouTube API definitions to quality labels
-                            if (definition === 'HD') {
-                                apiQuality = 'HD Quality (720p)';
-                                bestQualityText = 'HD (720p)';
-                                maxQualityLabel = 'HD';
-                                maxHeight = 720;
-                            } else if (definition === 'FULLHD' || definition === 'FHD') {
-                                apiQuality = 'Full HD Quality (1080p)';
-                                bestQualityText = 'Full HD (1080p)';
-                                maxQualityLabel = 'Full HD';
-                                maxHeight = 1080;
-                            } else if (definition === '2K' || definition === 'QHD') {
-                                apiQuality = '2K Quality (1440p)';
-                                bestQualityText = '2K (1440p)';
-                                maxQualityLabel = '2K';
-                                maxHeight = 1440;
-                            } else if (definition === '4K' || definition === 'UHD') {
-                                apiQuality = '4K Quality (2160p)';
-                                bestQualityText = '4K (2160p)';
-                                maxQualityLabel = '4K';
-                                maxHeight = 2160;
-                            } else if (definition === '8K') {
-                                apiQuality = '8K Quality (4320p)';
-                                bestQualityText = '8K (4320p)';
-                                maxQualityLabel = '8K';
-                                maxHeight = 4320;
-                            } else if (definition === 'SD') {
-                                apiQuality = 'Standard Quality (480p)';
-                                bestQualityText = 'SD (480p)';
-                                maxQualityLabel = 'SD';
-                                maxHeight = 480;
-                            } else {
-                                apiQuality = `Best Quality (${definition})`;
-                                bestQualityText = definition;
-                                maxQualityLabel = definition;
-                            }
-                        }
+                    option.value = 'best'; // API usually just gives one "best" video option
+
+                    let apiQualityLabel = detectedMaxQualityLabelFromIframe;
+                    if (!apiQualityLabel && apiVideoFormat.resolution && apiVideoFormat.resolution.includes('(')) {
+                         const match = apiVideoFormat.resolution.match(/\\(([^)]+)\\)/);
+                         if (match && match[1]) apiQualityLabel = mapQualityToFriendlyName(match[1].toLowerCase()); // Use map for consistency
                     }
-                    
-                    option.textContent = `Best Quality Available (${maxQualityLabel})`;
-                    if (maxHeight >= 1440) {
+                    if (!apiQualityLabel) apiQualityLabel = "Best Available";
+
+                    option.textContent = `Best Quality Available (${apiQualityLabel})`;
+                     if (['4K', '2K'].includes(apiQualityLabel) || (apiVideoFormat.height && apiVideoFormat.height >=1440) ) {
                         option.textContent += ' ✨';
                     }
                     qualitySelect.appendChild(option);
-                } else {
-                    // Handle case where even API fallback has no video format (should be rare)
-                    const audioOnlyAsVideo = currentVideoInfo.formats.find(fmt => fmt.resolution && fmt.resolution.toLowerCase().includes('audio'));
-                    if(audioOnlyAsVideo){
-                        qualityContainer.classList.add('d-none'); // No video options
-                    }
+                    bestQualityText = apiQualityLabel; // Update bestQualityText from API if iframe failed
                 }
             }
-
-            // Add audio option
-            const audioOption = document.createElement('option');
-            audioOption.value = 'audio';
-            audioOption.textContent = 'Audio Only (MP3)';
-            qualitySelect.appendChild(audioOption);
-
-            if (qualitySelect.options.length > 0) {
-                qualitySelect.selectedIndex = 0;
-                if (bestQualityInfo) bestQualityInfo.textContent = `Maximum quality available: ${bestQualityText}`;
-                // If 2K or 4K is available, highlight it
-                if (maxHeight >= 1440) {
-                    bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${bestQualityText} available!</strong>`;
+            // Update bestQualityInfo text based on the final maxQualityLabel
+            if (bestQualityInfo) {
+                if (maxQualityLabel && maxQualityLabel !== "Not available" && maxQualityLabel !== "Unknown") {
+                    bestQualityInfo.textContent = `Maximum quality detected: ${maxQualityLabel}`;
+                    if (['4K', '2K'].includes(maxQualityLabel) || maxHeight >= 1440) {
+                         bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${maxQualityLabel} available!</strong>`;
+                    }
+                } else {
+                    bestQualityInfo.textContent = 'Could not determine specific maximum quality from available formats.';
                 }
-            } else {
-                qualityContainer.classList.add('d-none');
-                if (bestQualityInfo) bestQualityInfo.textContent = 'No video quality options found.';
             }
 
         } else if (format === 'audio') {
@@ -269,7 +376,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     // Fetch video information
-    function fetchVideoInfo(url) {
+    async function fetchVideoInfo(url) {
         // Basic URL validation
         if (!url.match(/^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)) {
             alert('Please enter a valid YouTube URL');
@@ -280,20 +387,65 @@ document.addEventListener('DOMContentLoaded', function() {
         fetchInfoBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...';
         fetchInfoBtn.disabled = true;
         
-        fetch('/api/video-info', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ url })
-        })
-        .then(response => {
+        // Extract video ID (ensure this logic is robust)
+        let videoId = extractVideoId(url);
+        if (!videoId) {
+            displayError("Invalid YouTube URL or could not extract Video ID.");
+            submitButton.disabled = false;
+            urlInput.disabled = false;
+            return;
+        }
+        
+        currentVideoInfo = null; // Reset current video info
+        detectedMaxQualityLabelFromIframe = null; // Reset detected quality
+
+        // Show initial loading state
+        videoInfoCard.innerHTML = '<div class="text-center"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div> <p class="mt-2">Fetching video information...</p></div>';
+        if (bestQualityInfo) bestQualityInfo.textContent = 'Detecting maximum quality...';
+        
+        // Step 1: Try to get max quality using IFrame API
+        let iframeQualityCode = null;
+        try {
+            if (bestQualityInfo) bestQualityInfo.textContent = 'Detecting max quality via IFrame API...';
+            iframeQualityCode = await getQualityViaIframeAPI(videoId);
+            if (iframeQualityCode) {
+                detectedMaxQualityLabelFromIframe = mapQualityToFriendlyName(iframeQualityCode);
+                if (bestQualityInfo) {
+                    bestQualityInfo.textContent = `Maximum quality available: ${detectedMaxQualityLabelFromIframe}`;
+                    if (['4K', '2K', '5K', '8K'].includes(detectedMaxQualityLabelFromIframe) || (detectedMaxQualityLabelFromIframe.includes('p') && parseInt(detectedMaxQualityLabelFromIframe) >= 1440) ) {
+                        bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${detectedMaxQualityLabelFromIframe} available!</strong>`;
+                    }
+                }
+                // Update quality dropdown header immediately if possible
+                // The actual options will be populated after full API call
+                updateQualityOptions(); // Call to update with the new detectedMaxQualityLabelFromIframe
+            } else {
+                if (bestQualityInfo) bestQualityInfo.textContent = 'Could not determine max quality via IFrame. Fetching all formats...';
+            }
+        } catch (error) {
+            console.warn('IFrame API quality detection failed:', error);
+            if (bestQualityInfo) {
+                if (error === 'timeout') {
+                    bestQualityInfo.textContent = 'IFrame API timed out. Fetching all formats...';
+                } else {
+                    bestQualityInfo.textContent = 'IFrame API error. Fetching all formats...';
+                }
+            }
+        }
+
+        // Step 2: Fetch detailed video info from backend
+        if (bestQualityInfo && !detectedMaxQualityLabelFromIframe) { // If iframe failed, update text
+             videoInfoCard.innerHTML = '<div class="text-center"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div> <p class="mt-2">Fetching all video formats...</p></div>';
+        } else if (detectedMaxQualityLabelFromIframe) {
+             videoInfoCard.innerHTML = `<div class="text-center"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div> <p class="mt-2">Fetching full format list (Max Quality: ${detectedMaxQualityLabelFromIframe})...</p></div>`;
+        }
+
+        try {
+            const response = await fetch(`/api/video_info?url=${encodeURIComponent(url)}`);
             if (!response.ok) {
                 throw new Error('Failed to fetch video information');
             }
-            return response.json();
-        })
-        .then(data => {
+            const data = await response.json();
             if (data.error) {
                 throw new Error(data.error);
             }
@@ -365,16 +517,14 @@ document.addEventListener('DOMContentLoaded', function() {
             
             // Show video info card
             videoInfoCard.classList.remove('d-none');
-        })
-        .catch(error => {
+        } catch (error) {
             alert('Error: ' + error.message);
             console.error('Error:', error);
-        })
-        .finally(() => {
+        } finally {
             // Reset button state
             fetchInfoBtn.innerHTML = '<i class="bi bi-search"></i> Fetch Info';
             fetchInfoBtn.disabled = false;
-        });
+        }
     }
     
     // Start the download process
