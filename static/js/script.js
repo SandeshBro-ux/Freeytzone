@@ -40,6 +40,57 @@ document.addEventListener('DOMContentLoaded', function() {
     // Global variable to store the max quality label detected by the IFrame API
     let detectedMaxQualityLabelFromIframe = null;
 
+    // Add event listener for the Fetch Info button
+    if (fetchInfoBtn) {
+        fetchInfoBtn.addEventListener('click', function() {
+            const url = youtubeUrlInput.value.trim();
+            if (url) {
+                fetchVideoInfo(url);
+            } else {
+                // displayError is a good function to call if it exists and is set up
+                // For now, let's ensure a simple alert or console log if displayError isn't robustly defined yet
+                alert("Please enter a YouTube URL."); 
+                console.warn("YouTube URL input is empty.");
+                // Or if you have a dedicated error display for the input field:
+                // if (videoInfoCard) videoInfoCard.innerHTML = '<p class="text-danger">Please enter a URL.</p>';
+            }
+        });
+    } else {
+        console.error("Fetch Info Button (fetch-info-btn) not found in the DOM!");
+    }
+    
+    // Event listener for format select change (if it influences quality or UI)
+    if (formatSelect) {
+        formatSelect.addEventListener('change', updateQualityOptions); 
+    }
+
+    // Event listener for the main download button (assuming ID 'download-btn')
+    if (downloadBtn) {
+        downloadBtn.addEventListener('click', startDownload);
+    } else {
+        console.error("Download Button (download-btn) not found in the DOM!");
+    }
+    
+    // Event listeners for other buttons if they exist (new download, retry, cancel)
+    if (newDownloadBtn) {
+        newDownloadBtn.addEventListener('click', resetUI);
+    }
+    if (newDownloadBtnError) {
+        newDownloadBtnError.addEventListener('click', resetUI);
+    }
+    if (retryBtn) {
+        retryBtn.addEventListener('click', () => {
+            if (currentVideoInfo && currentVideoInfo.original_url) { // Assuming you store original_url
+                startDownload(); // Retry last download
+            } else {
+                resetUI();
+            }
+        });
+    }
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', cancelDownload);
+    }
+
     // Promise that resolves when the YouTube IFrame API is ready
     const youtubeApiReadyPromise = new Promise(resolve => {
         if (typeof YT !== 'undefined' && YT.Player) {
@@ -744,33 +795,4 @@ document.addEventListener('DOMContentLoaded', function() {
             console.error('Error canceling download:', error);
         });
     }
-    
-    // Event Listeners
-    fetchInfoBtn.addEventListener('click', () => {
-        fetchVideoInfo(youtubeUrlInput.value);
-    });
-    
-    youtubeUrlInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            fetchVideoInfo(youtubeUrlInput.value);
-        }
-    });
-    
-    formatSelect.addEventListener('change', updateQualityOptions);
-    
-    downloadBtn.addEventListener('click', startDownload);
-    
-    cancelBtn.addEventListener('click', cancelDownload);
-    
-    newDownloadBtn.addEventListener('click', resetUI);
-    
-    newDownloadBtnError.addEventListener('click', resetUI);
-    
-    retryBtn.addEventListener('click', () => {
-        // Hide error UI and go back to video info
-        downloadErrorContainer.classList.add('d-none');
-        videoInfoCard.classList.remove('d-none');
-        downloadProgressCard.classList.add('d-none');
-        cancelBtn.classList.remove('d-none');
-    });
 });
