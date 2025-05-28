@@ -1,6 +1,8 @@
 // YouTube Downloader Frontend Script
+console.log("static/js/script.js loaded");
 
 document.addEventListener('DOMContentLoaded', function() {
+    console.log("DOMContentLoaded event fired");
     // DOM Elements
     const youtubeUrlInput = document.getElementById('youtube-url');
     const fetchInfoBtn = document.getElementById('fetch-info-btn');
@@ -465,7 +467,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (urlInput) urlInput.disabled = false;
             return;
         }
-
+        
         if (submitButton) {
             submitButton.disabled = true;
             submitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...';
@@ -521,7 +523,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (data.error) {
                 throw new Error(data.error);
             }
-
+            
             if (!data.formats || data.formats.length === 0) {
                 // Even if formats are empty, we might have title/thumbnail etc.
                 displayVideoDetails(data); // Display whatever info we got (title, thumbnail)
