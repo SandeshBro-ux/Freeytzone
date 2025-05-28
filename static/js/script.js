@@ -43,16 +43,13 @@ document.addEventListener('DOMContentLoaded', function() {
     // Add event listener for the Fetch Info button
     if (fetchInfoBtn) {
         fetchInfoBtn.addEventListener('click', function() {
+            console.log("Fetch Info button clicked");
             const url = youtubeUrlInput.value.trim();
             if (url) {
                 fetchVideoInfo(url);
             } else {
-                // displayError is a good function to call if it exists and is set up
-                // For now, let's ensure a simple alert or console log if displayError isn't robustly defined yet
                 alert("Please enter a YouTube URL."); 
                 console.warn("YouTube URL input is empty.");
-                // Or if you have a dedicated error display for the input field:
-                // if (videoInfoCard) videoInfoCard.innerHTML = '<p class="text-danger">Please enter a URL.</p>';
             }
         });
     } else {
