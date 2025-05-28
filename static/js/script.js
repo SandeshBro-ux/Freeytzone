@@ -32,6 +32,15 @@ document.addEventListener('DOMContentLoaded', function() {
     const newDownloadBtnError = document.getElementById('new-download-btn-error');
     const channelLogo = document.getElementById('channel-logo');
 
+    // Log if critical elements are not found
+    if (!youtubeUrlInput) console.error("youtubeUrlInput not found!");
+    if (!fetchInfoBtn) console.error("fetchInfoBtn not found!");
+    if (!videoInfoCard) console.error("videoInfoCard (video-info-card) not found!");
+    if (!formatSelect) console.error("formatSelect not found!");
+    if (!qualitySelect) console.error("qualitySelect not found!");
+    if (!downloadBtn) console.error("downloadButton (download-btn) not found!");
+    if (!bestQualityInfo) console.error("bestQualityInfo not found!");
+
     // State
     let currentVideoInfo = null;
     let currentDownloadId = null;
@@ -41,6 +50,25 @@ document.addEventListener('DOMContentLoaded', function() {
     let iframeApiPlayer = null;
     // Global variable to store the max quality label detected by the IFrame API
     let detectedMaxQualityLabelFromIframe = null;
+
+    // Helper function to extract Video ID from YouTube URL
+    function extractVideoId(url) {
+        let videoId = null;
+        const youtubeRegexPatterns = [
+            /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/, // Standard, embed, shorts, youtu.be
+            /(?:https?:\/\/)?(?:www\.)?youtube\.com\/live\/([a-zA-Z0-9_-]{11})/, // Live URLs
+            /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/ // another shorts variant
+        ];
+        for (const pattern of youtubeRegexPatterns) {
+            const match = url.match(pattern);
+            if (match && match[1]) {
+                videoId = match[1];
+                break;
+            }
+        }
+        console.log(`Extracted videoId: ${videoId} from URL: ${url}`);
+        return videoId;
+    }
 
     // Add event listener for the Fetch Info button
     if (fetchInfoBtn) {
