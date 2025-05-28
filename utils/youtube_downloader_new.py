@@ -337,11 +337,11 @@ class YouTubeDownloader:
         
         # Only try browser emulation if it's not disabled
         if not browser_disabled:
+            driver, chrome_tmp_dir = None, None
             try:
                 logger.debug(f"Attempting to fetch info with browser emulation for {url}")
                 
                 # Use our centralized Chrome setup function
-                driver, chrome_tmp_dir = None, None
                 try:
                     driver, chrome_tmp_dir = setup_chrome_driver()
                     
@@ -589,6 +589,7 @@ class YouTubeDownloader:
                 for thumb in raw_thumbnails:
                     thumbnails.append({'url': thumb.get('url'), 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
                 video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
+                
                 raw_formats = raw_info.get('formats', [])
                 processed_formats = []
                 audio_formats_yt_dlp = [f for f in raw_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
@@ -684,9 +685,9 @@ class YouTubeDownloader:
                 try:
                     os.remove(temp_cookie_file_path)
                     logger.info(f"Removed temporary cookie file: {temp_cookie_file_path}")
-            except Exception as e:
+                except Exception as e:
                     logger.error(f"Error removing temporary cookie file {temp_cookie_file_path}: {e}")
-
+        
         # API Fallback for both browser and direct yt-dlp approaches
         if not detailed_formats_available:
             logger.debug(f"Fetching base video info via YouTube API for {video_id}")
