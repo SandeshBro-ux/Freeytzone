@@ -920,13 +920,28 @@ class YouTubeDownloader:
                     self._save_downloads()
                     return
                 if quality == 'best':
-                    # Select best video and best audio streams; yt-dlp will recode to mp4 (AAC) below
-                    format_str = 'bestvideo[height>=1440]+bestaudio/best'
+                    # Select best video up to 1440p and best audio.
+                    # Fallback to best overall format up to 1440p if specific combo fails.
+                    format_str = 'bestvideo[height<=1440]+bestaudio/best[height<=1440]'
                 else:
-                    # Extract height from quality string (e.g., 1920x1080 -> 1080)
-                    height = quality.split('x')[1] if 'x' in quality else quality
-                    # Select video at the requested resolution plus best audio stream
-                    format_str = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
+                    # Extract height from quality string (e.g., 1920x1080 -> 1080 or a format_id)
+                    # If quality is a format_id, this height extraction won't apply directly,
+                    # yt-dlp will use the format_id directly if it's a valid one.
+                    # For resolution-based like '1080p', extract height.
+                    height_str_match = re.search(r'(\d+)p', str(quality))
+                    if 'x' in str(quality): # e.g. 1920x1080
+                        height = quality.split('x')[1]
+                    elif height_str_match: # e.g. 1080p
+                        height = height_str_match.group(1)
+                    else: # Assuming it might be a direct format ID or a generic 'best'/'worst'
+                        height = quality # Pass it as is, or handle as format ID if specific
+                    
+                    # If a specific format ID was passed (not 'best', 'worst', or resoltion string)
+                    if not str(height).isnumeric() and quality not in ['best', 'worst']:
+                        format_str = quality # Use the format ID directly
+                    else:
+                        # Select video at the requested resolution plus best audio stream
+                        format_str = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
                 
                 logger.debug(f"Using format string: {format_str}")
                 
