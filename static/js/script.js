@@ -350,7 +350,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (['4K', '2K'].includes(maxQualityLabel) || maxHeight >= 1440) {
                          bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${maxQualityLabel} available!</strong>`;
                     }
-                } else {
+            } else {
                     bestQualityInfo.textContent = 'Could not determine specific maximum quality from available formats.';
                 }
             }
@@ -375,156 +375,204 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
-    // Fetch video information
+    // Helper function for fetch with timeout
+    async function fetchWithTimeout(resource, options = {}, timeout = 30000) { // Default timeout 30 seconds
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+
+        const response = await fetch(resource, {
+            ...options,
+            signal: controller.signal  
+        });
+        clearTimeout(id);
+        return response;
+    }
+
     async function fetchVideoInfo(url) {
-        // Basic URL validation
-        if (!url.match(/^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)) {
-            alert('Please enter a valid YouTube URL');
-            return;
-        }
-        
-        // Change button to loading state
-        fetchInfoBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...';
-        fetchInfoBtn.disabled = true;
-        
-        // Extract video ID (ensure this logic is robust)
+        // Existing initial variable declarations (ensure all are here: videoInfoCard, qualitySelect, etc.)
+        const videoInfoCard = document.getElementById('video-info-card');
+        const qualitySelect = document.getElementById('quality-select');
+        const downloadButton = document.getElementById('download-button');
+        const bestQualityInfo = document.getElementById('best-quality-info'); 
+        const formatSelect = document.getElementById('format-select');
+        const qualityContainer = document.getElementById('quality-container');
+        const submitButton = document.getElementById('fetch-info-btn'); 
+        const urlInput = document.getElementById('youtube-url');
+
+        // Reset UI elements
+        videoInfoCard.innerHTML = '';
+        videoInfoCard.classList.add('d-none');
+        qualitySelect.innerHTML = '';
+        if (downloadButton) downloadButton.disabled = true;
+        if (bestQualityInfo) bestQualityInfo.textContent = '';
+        if (qualityContainer) qualityContainer.classList.add('d-none');
+
+        currentVideoInfo = null; 
+        detectedMaxQualityLabelFromIframe = null; 
+
         let videoId = extractVideoId(url);
         if (!videoId) {
             displayError("Invalid YouTube URL or could not extract Video ID.");
-            submitButton.disabled = false;
-            urlInput.disabled = false;
+            if (submitButton) submitButton.disabled = false;
+            if (urlInput) urlInput.disabled = false;
             return;
         }
-        
-        currentVideoInfo = null; // Reset current video info
-        detectedMaxQualityLabelFromIframe = null; // Reset detected quality
 
-        // Show initial loading state
-        videoInfoCard.innerHTML = '<div class="text-center"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div> <p class="mt-2">Fetching video information...</p></div>';
+        if (submitButton) {
+            submitButton.disabled = true;
+            submitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...';
+        }
+        if (urlInput) urlInput.disabled = true;
+
+        updateLoadingStatus('Initializing video data request...', true);
         if (bestQualityInfo) bestQualityInfo.textContent = 'Detecting maximum quality...';
-        
-        // Step 1: Try to get max quality using IFrame API
-        let iframeQualityCode = null;
+
+        let iframeSuccess = false;
         try {
-            if (bestQualityInfo) bestQualityInfo.textContent = 'Detecting max quality via IFrame API...';
-            iframeQualityCode = await getQualityViaIframeAPI(videoId);
+            updateLoadingStatus('Detecting max quality via IFrame API (max 15s)...', true);
+            const iframeQualityCode = await getQualityViaIframeAPI(videoId); // Uses its own internal timeout
             if (iframeQualityCode) {
+                iframeSuccess = true;
                 detectedMaxQualityLabelFromIframe = mapQualityToFriendlyName(iframeQualityCode);
-                if (bestQualityInfo) {
-                    bestQualityInfo.textContent = `Maximum quality available: ${detectedMaxQualityLabelFromIframe}`;
-                    if (['4K', '2K', '5K', '8K'].includes(detectedMaxQualityLabelFromIframe) || (detectedMaxQualityLabelFromIframe.includes('p') && parseInt(detectedMaxQualityLabelFromIframe) >= 1440) ) {
-                        bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${detectedMaxQualityLabelFromIframe} available!</strong>`;
-                    }
-                }
-                // Update quality dropdown header immediately if possible
-                // The actual options will be populated after full API call
-                updateQualityOptions(); // Call to update with the new detectedMaxQualityLabelFromIframe
+                updateBestQualityInfoText(detectedMaxQualityLabelFromIframe, 'iframe');
+                updateQualityOptions(); 
+                updateLoadingStatus(`Detected Max Quality: ${detectedMaxQualityLabelFromIframe}. Fetching full details (max 30s)...`, true);
             } else {
-                if (bestQualityInfo) bestQualityInfo.textContent = 'Could not determine max quality via IFrame. Fetching all formats...';
+                updateBestQualityInfoText(null, 'iframe_failed_no_levels');
+                updateLoadingStatus('IFrame API: No quality levels. Fetching details from backend (max 30s)...', true);
             }
         } catch (error) {
             console.warn('IFrame API quality detection failed:', error);
-            if (bestQualityInfo) {
-                if (error === 'timeout') {
-                    bestQualityInfo.textContent = 'IFrame API timed out. Fetching all formats...';
-                } else {
-                    bestQualityInfo.textContent = 'IFrame API error. Fetching all formats...';
-                }
-            }
+            let iframeErrorMsg = 'IFrame API error.';
+            if (error === 'timeout') iframeErrorMsg = 'IFrame API timed out.';
+            else if (typeof error === 'string' && error.startsWith('player_error')) iframeErrorMsg = `IFrame Player Error (Code: ${error.split('_')[2]})`;
+            
+            updateBestQualityInfoText(null, 'iframe_error', iframeErrorMsg);
+            updateLoadingStatus(`${iframeErrorMsg} Proceeding to backend (max 30s)...`, true);
         }
 
-        // Step 2: Fetch detailed video info from backend
-        if (bestQualityInfo && !detectedMaxQualityLabelFromIframe) { // If iframe failed, update text
-             videoInfoCard.innerHTML = '<div class="text-center"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div> <p class="mt-2">Fetching all video formats...</p></div>';
-        } else if (detectedMaxQualityLabelFromIframe) {
-             videoInfoCard.innerHTML = `<div class="text-center"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div> <p class="mt-2">Fetching full format list (Max Quality: ${detectedMaxQualityLabelFromIframe})...</p></div>`;
-        }
-
+        updateLoadingStatus(iframeSuccess ? `Fetching full format list (Max Quality: ${detectedMaxQualityLabelFromIframe})...` : 'Fetching all video details from backend (max 30s)...', true);
+        
         try {
-            const response = await fetch(`/api/video_info?url=${encodeURIComponent(url)}`);
-            if (!response.ok) {
-                throw new Error('Failed to fetch video information');
+            // Use fetchWithTimeout for the backend call
+            const backendTimeout = 30000; // 30 seconds for backend
+            const backendResponse = await fetchWithTimeout(`/api/video_info?url=${encodeURIComponent(url)}`, {}, backendTimeout);
+            
+            if (!backendResponse.ok) {
+                let errorMsg = `Backend Error: ${backendResponse.status} ${backendResponse.statusText}`;
+                try {
+                    const errData = await backendResponse.json();
+                    errorMsg = errData.error || errorMsg;
+                } catch (e) { /* Ignore if error response is not json */ }
+                throw new Error(errorMsg);
             }
-            const data = await response.json();
+
+            const data = await backendResponse.json();
+            currentVideoInfo = data;
+
             if (data.error) {
                 throw new Error(data.error);
             }
-            
-            // Store video info
-            currentVideoInfo = data;
-            
-            // Update UI
-            videoTitle.textContent = data.title || 'Unknown Title';
-            videoUploader.textContent = data.uploader || 'Unknown Uploader';
-            videoViews.textContent = formatViewCount(data.view_count);
-            
-            // Format and update likes count
-            const likesCount = data.like_count || 0;
-            if (videoLikes) {
-                let likesText = '';
-                if (likesCount >= 1000000) {
-                    const floored = Math.floor(likesCount / 100000) / 10;
-                    likesText = `${floored}M likes`;
-                } else if (likesCount >= 1000) {
-                    const floored = Math.floor(likesCount / 100) / 10;
-                    likesText = `${floored}K likes`;
-                } else {
-                    likesText = `${likesCount} likes`;
+
+            if (!data.formats || data.formats.length === 0) {
+                // Even if formats are empty, we might have title/thumbnail etc.
+                displayVideoDetails(data); // Display whatever info we got (title, thumbnail)
+                updateQualityOptions(); // This will show iframe quality if available, or "no formats"
+                if (bestQualityInfo && detectedMaxQualityLabelFromIframe) {
+                     updateBestQualityInfoText(detectedMaxQualityLabelFromIframe, 'iframe');
+                     bestQualityInfo.textContent += ". No specific download formats returned from backend.";
+                } else if (bestQualityInfo) {
+                     bestQualityInfo.textContent = "No downloadable formats found, though video info might be available.";
                 }
-                videoLikes.textContent = likesText;
-            }
-            
-            // Format and update subscriber count
-            if (channelSubscribers) {
-                if (data.subscriber_count && data.subscriber_count !== 'N/A') {
-                    let subCount = data.subscriber_count;
-                    let displaySubs;
-                    if (subCount >= 1000000) {
-                        displaySubs = `${(subCount / 1000000).toFixed(1)}M subscribers`;
-                    } else if (subCount >= 1000) {
-                        displaySubs = `${(subCount / 1000).toFixed(1)}K subscribers`;
-                    } else {
-                        displaySubs = `${subCount} subscribers`;
-                    }
-                    channelSubscribers.textContent = displaySubs;
-                } else {
-                    channelSubscribers.textContent = 'Subscribers unavailable';
-                }
-            }
-            
-            // Update channel logo if available
-            if (data.channel_logo) {
-                channelLogo.src = data.channel_logo;
-                channelLogo.style.display = 'inline-block';
+                // Don't necessarily call displayError, as some info might be present
             } else {
-                channelLogo.style.display = 'none';
+                displayVideoDetails(data); 
+                updateQualityOptions();    
+                if (downloadButton) downloadButton.disabled = false;
+                const loadingSpinnerContainer = document.getElementById('loading-spinner-container');
+                if(loadingSpinnerContainer) loadingSpinnerContainer.innerHTML = ''; 
             }
-            
-            // Set thumbnail and duration badge if available
-            if (data.thumbnails && data.thumbnails.length > 0) {
-                // Duration badge overlay
-                const badge = document.createElement('div');
-                badge.className = 'duration-badge';
-                badge.textContent = formatDuration(data.duration);
-                // Clear container and set background
-                thumbnailContainer.innerHTML = '';
-                thumbnailContainer.style.backgroundImage = `url('${data.thumbnails[0].url}')`;
-                thumbnailContainer.appendChild(badge);
-            }
-            
-            // Update quality options
-            updateQualityOptions();
-            
-            // Show video info card
             videoInfoCard.classList.remove('d-none');
+
         } catch (error) {
-            alert('Error: ' + error.message);
-            console.error('Error:', error);
+            console.error('Error fetching video info from backend:', error);
+            let detailedErrorMessage = error.message || 'An unexpected error occurred while fetching backend data.';
+            if (error.name === 'AbortError') {
+                detailedErrorMessage = 'Backend request timed out (30 seconds). Please try again.';
+            }
+            displayError(detailedErrorMessage);
+            if (iframeSuccess && (!currentVideoInfo || !currentVideoInfo.formats)) {
+                updateQualityOptions(); 
+            }
         } finally {
-            // Reset button state
-            fetchInfoBtn.innerHTML = '<i class="bi bi-search"></i> Fetch Info';
-            fetchInfoBtn.disabled = false;
+            if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.innerHTML = 'Fetch Info'; 
+            }
+            if (urlInput) urlInput.disabled = false;
+            
+            if (!currentVideoInfo && videoInfoCard.classList.contains('d-none') === false) {
+                 if (!videoInfoCard.querySelector('.video-details-grid')) { 
+                    // If still no content, ensure error or clear message is there
+                    // displayError would have already run if backend error, otherwise, it means iframe also failed bad
+                    if (!videoInfoCard.querySelector('.alert-danger')){
+                         videoInfoCard.innerHTML = '<p class="text-warning text-center">Could not load full video information. IFrame detection may have provided partial quality info.</p>';
+                    }
+                 }
+            }
         }
+    }
+    
+    // Helper to update loading status in the videoInfoCard
+    function updateLoadingStatus(message, showSpinner = true) {
+        if (videoInfoCard) {
+            videoInfoCard.classList.remove('d-none');
+            videoInfoCard.innerHTML = getLoadingSpinnerHTML(message, showSpinner);
+        }
+    }
+    
+    // Helper to generate spinner HTML (centralized)
+    function getLoadingSpinnerHTML(message, showSpinner = true) {
+        let spinner = showSpinner ? '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>' : '';
+        return `<div id="loading-spinner-container" class="text-center p-3">${spinner} <p class="mt-2 mb-0">${message}</p></div>`;
+    }
+    
+    // Helper function to update the best quality information text element
+    function updateBestQualityInfoText(qualityLabel, source, errorMsg = '') {
+        if (!bestQualityInfo) return;
+
+        if (source === 'iframe') {
+            bestQualityInfo.textContent = `Max quality (IFrame): ${qualityLabel}`;
+            if (['4K', '2K', '5K', '8K'].includes(qualityLabel) || (qualityLabel && qualityLabel.includes('p') && parseInt(qualityLabel) >= 1440)) {
+                bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${qualityLabel} detected by IFrame!</strong> (Fetching full list...)`;
+            }
+        } else if (source === 'iframe_failed_no_levels') {
+            bestQualityInfo.textContent = 'IFrame API: No quality levels found.';
+        } else if (source === 'iframe_error') {
+            bestQualityInfo.textContent = `IFrame API Error: ${errorMsg}`;
+        } else if (source === 'backend') {
+            // This part is now handled more directly in updateQualityOptions and displayVideoDetails
+            // For example, if iframe worked, this text might already be set.
+            // If iframe failed, then updateQualityOptions will set it based on backend data.
+            if (qualityLabel && qualityLabel !== "Not available" && qualityLabel !== "Unknown") {
+                bestQualityInfo.textContent = `Maximum quality (Backend): ${qualityLabel}`;
+                if (['4K', '2K'].includes(qualityLabel) || (qualityLabel && qualityLabel.includes('p') && parseInt(qualityLabel) >= 1440)) {
+                     bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${qualityLabel} available!</strong>`;
+                }
+            } else if (!detectedMaxQualityLabelFromIframe) { // Only show this if IFrame also failed
+                bestQualityInfo.textContent = 'Could not determine specific maximum quality from available formats.';
+            }
+        }
+    }
+    
+    // Modify displayError to also reset the loading spinner area
+    function displayError(message) {
+        if (videoInfoCard) {
+            videoInfoCard.innerHTML = `<div class="alert alert-danger text-center" role="alert">${message}</div>`;
+            videoInfoCard.classList.remove('d-none');
+        }
+        // Clear best quality info text on error too
+        if (bestQualityInfo) bestQualityInfo.textContent = '';
     }
     
     // Start the download process
