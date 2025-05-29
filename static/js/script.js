@@ -258,7 +258,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 return qualityLevel.charAt(0).toUpperCase() + qualityLevel.slice(1); // Capitalize
         }
     }
-
+    
     // Format duration from seconds to MM:SS or HH:MM:SS
     function formatDuration(seconds) {
         if (!seconds) return '0:00';
@@ -481,85 +481,69 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     async function fetchVideoInfo(url) {
-        // Existing initial variable declarations (ensure all are here: videoInfoCard, qualitySelect, etc.)
-        const videoInfoCard = document.getElementById('video-info-card');
-        const qualitySelect = document.getElementById('quality-select');
-        const downloadButton = document.getElementById('download-button');
-        const bestQualityInfo = document.getElementById('best-quality-info'); 
-        const formatSelect = document.getElementById('format-select');
-        const qualityContainer = document.getElementById('quality-container');
-        const submitButton = document.getElementById('fetch-info-btn'); 
-        const urlInput = document.getElementById('youtube-url');
+        resetUI();
+        updateLoadingStatus('Extracting video ID...');
+        const videoId = extractVideoId(url);
 
-        // Reset UI elements
-        videoInfoCard.innerHTML = '';
-        videoInfoCard.classList.add('d-none');
-        qualitySelect.innerHTML = '';
-        if (downloadButton) downloadButton.disabled = true;
-        if (bestQualityInfo) bestQualityInfo.textContent = '';
-        if (qualityContainer) qualityContainer.classList.add('d-none');
-
-        currentVideoInfo = null; 
-        detectedMaxQualityLabelFromIframe = null; 
-
-        let videoId = extractVideoId(url);
         if (!videoId) {
-            displayError("Invalid YouTube URL or could not extract Video ID.");
-            if (submitButton) submitButton.disabled = false;
-            if (urlInput) urlInput.disabled = false;
+            displayError('Invalid YouTube URL. Could not extract video ID.');
+            updateLoadingStatus('Failed to extract video ID.', false);
             return;
         }
-        
-        if (submitButton) {
-            submitButton.disabled = true;
-            submitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...';
-        }
-        if (urlInput) urlInput.disabled = true;
 
-        updateLoadingStatus('Initializing video data request...', true);
-        if (bestQualityInfo) bestQualityInfo.textContent = 'Detecting maximum quality...';
-
-        let iframeSuccess = false;
+        updateLoadingStatus('Detecting max quality via IFrame API (max 15s)...');
+        let iframeQualityLabel = null;
         try {
-            updateLoadingStatus('Detecting max quality via IFrame API (max 15s)...', true);
-            const iframeQualityCode = await getQualityViaIframeAPI(videoId); // Uses its own internal timeout
-            if (iframeQualityCode) {
-                iframeSuccess = true;
-                detectedMaxQualityLabelFromIframe = mapQualityToFriendlyName(iframeQualityCode);
-                updateBestQualityInfoText(detectedMaxQualityLabelFromIframe, 'iframe');
-                updateQualityOptions(); 
-                updateLoadingStatus(`Detected Max Quality: ${detectedMaxQualityLabelFromIframe}. Fetching full details (max 30s)...`, true);
+            const qualityLevel = await getQualityViaIframeAPI(videoId);
+            if (qualityLevel) {
+                iframeQualityLabel = mapQualityToFriendlyName(qualityLevel);
+                console.log("Max quality from IFrame API:", iframeQualityLabel);
+                updateBestQualityInfoText(iframeQualityLabel, 'IFrame API');
             } else {
-                updateBestQualityInfoText(null, 'iframe_failed_no_levels');
-                updateLoadingStatus('IFrame API: No quality levels. Fetching details from backend (max 30s)...', true);
+                updateBestQualityInfoText('Unavailable', 'IFrame API', 'Could not detect via IFrame.');
             }
         } catch (error) {
-            console.warn('IFrame API quality detection failed:', error);
-            let iframeErrorMsg = 'IFrame API error.';
-            if (error === 'timeout') iframeErrorMsg = 'IFrame API timed out.';
-            else if (typeof error === 'string' && error.startsWith('player_error')) iframeErrorMsg = `IFrame Player Error (Code: ${error.split('_')[2]})`;
-            
-            updateBestQualityInfoText(null, 'iframe_error', iframeErrorMsg);
-            updateLoadingStatus(`${iframeErrorMsg} Proceeding to backend (max 30s)...`, true);
+            console.warn('IFrame API quality detection failed or timed out:', error);
+            let errorMsg = 'IFrame API timed out or failed.';
+            if (typeof error === 'string' && error.startsWith('player_error_')) {
+                errorMsg = `IFrame Player Error: ${error.substring('player_error_'.length)}`;
+            }
+            updateBestQualityInfoText('Unavailable', 'IFrame API', errorMsg);
         }
 
-        updateLoadingStatus(iframeSuccess ? `Fetching full format list (Max Quality: ${detectedMaxQualityLabelFromIframe})...` : 'Fetching all video details from backend (max 30s)...', true);
+        updateLoadingStatus('Fetching video details from backend...');
+        currentVideoInfo = null;
+        const fetchStartTime = Date.now();
         
         try {
-            // Use fetchWithTimeout for the backend call
-            const backendTimeout = 30000; // 30 seconds for backend
-            const backendResponse = await fetchWithTimeout(`/api/video_info?url=${encodeURIComponent(url)}`, {}, backendTimeout);
-            
-            if (!backendResponse.ok) {
-                let errorMsg = `Backend Error: ${backendResponse.status} ${backendResponse.statusText}`;
+            // Match backend: /api/video-info (hyphen) and POST method
+            const response = await fetchWithTimeout('/api/video-info', { 
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ url: url }) 
+            }, 30000); // 30-second timeout for backend API
+
+            const backendApiDuration = Date.now() - fetchStartTime;
+            console.log(`Backend API call took ${backendApiDuration}ms`);
+
+            if (!response.ok) {
+                let errorData;
                 try {
-                    const errData = await backendResponse.json();
-                    errorMsg = errData.error || errorMsg;
-                } catch (e) { /* Ignore if error response is not json */ }
-                throw new Error(errorMsg);
+                    errorData = await response.json();
+                } catch (e) { // If parsing errorData as JSON fails
+                    errorData = { error: `HTTP error! status: ${response.status} - ${response.statusText}` };
+                }
+                const errorMsg = errorData.error || `Backend Error: ${response.status}`;
+                console.error("Error fetching video info from backend:", errorMsg, errorData);
+                displayError(errorMsg);
+                updateLoadingStatus('Error fetching details.', false);
+                updateBestQualityInfoText(iframeQualityLabel || 'Unavailable', iframeQualityLabel ? 'IFrame API (fallback)' : 'API Error', 'Backend call failed.');
+                return;
             }
 
-            const data = await backendResponse.json();
+            const data = await response.json();
             currentVideoInfo = data;
 
             if (data.error) {
@@ -593,7 +577,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 detailedErrorMessage = 'Backend request timed out (30 seconds). Please try again.';
             }
             displayError(detailedErrorMessage);
-            if (iframeSuccess && (!currentVideoInfo || !currentVideoInfo.formats)) {
+            if (iframeQualityLabel && (!currentVideoInfo || !currentVideoInfo.formats)) {
                 updateQualityOptions(); 
             }
         } finally {
