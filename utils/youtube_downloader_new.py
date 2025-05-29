@@ -181,13 +181,14 @@ def parse_size(value_str, unit):
 # Function to extract video ID (moved here for utility)
 def extract_video_id(url):
     patterns = [
-        r'(?:youtube(?:-nocookie)?\.com/(?:[^/\\n\\s]+/watch\\S*v=|embed/|v/|shorts/|live/)|youtu\.be/)([\\w-]{11})\',\
-        r'(?:youtube(?:-nocookie)?\.com/(?:[^/\\n\\s]+/watch\\S*v=|embed/|v/|shorts/|live/)|youtu\.be/)([\\w-]{11})\\?\S*si=\S+\''
+        r'(?:youtube(?:-nocookie)?\.com/(?:[^/\n\s]+/watch\S*v=|embed/|v/|shorts/|live/)|youtu\.be/)([\w-]{11})',
+        r'(?:youtube(?:-nocookie)?\.com/(?:[^/\n\s]+/watch\S*v=|embed/|v/|shorts/|live/)|youtu\.be/)([\w-]{11})(?:\?.*)?' # Simplified second pattern to catch ID with any query params
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
+    logger.debug(f"Could not extract video ID from URL: {url} using patterns.")
     return None
 
 # Function to get video metadata using YouTube Data API v3
@@ -664,8 +665,8 @@ class YouTubeDownloader:
                     if not str(height).isnumeric() and quality not in ['best', 'worst']:
                         format_str = quality # Use the format ID directly
                     else:
-                    # Select video at the requested resolution plus best audio stream
-                    format_str = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
+                        # Select video at the requested resolution plus best audio stream
+                        format_str = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
                 
                 logger.debug(f"Using format string: {format_str}")
                 
