@@ -150,19 +150,25 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Function to get video quality using the IFrame API
     function getQualityViaIframeAPI(videoId) {
+        console.log("[IFrameAPI] getQualityViaIframeAPI called for videoId:", videoId);
         return new Promise(async (resolve, reject) => {
+            console.log("[IFrameAPI] Waiting for youtubeApiReadyPromise...");
             await youtubeApiReadyPromise; // Ensure API is ready
+            console.log("[IFrameAPI] youtubeApiReadyPromise resolved. API is ready.");
 
             destroyIframePlayer(); // Clean up any previous player
+            console.log("[IFrameAPI] Previous player (if any) destroyed.");
 
             const timeoutDuration = 15000; // 15 seconds timeout for quality detection
             let qualityDetectionTimeout = setTimeout(() => {
-                console.warn('YouTube IFrame API quality detection timed out.');
+                console.warn('[IFrameAPI] Quality detection TIMED OUT after', timeoutDuration, 'ms.');
                 destroyIframePlayer();
                 reject('timeout');
             }, timeoutDuration);
+            console.log("[IFrameAPI] Quality detection timeout set for", timeoutDuration, "ms.");
 
             try {
+                console.log("[IFrameAPI] Attempting to create new YT.Player for container 'iframe-player-container' with videoId:", videoId);
                 iframeApiPlayer = new YT.Player('iframe-player-container', {
                     height: '0', // Invisible
                     width: '0',  // Invisible
@@ -170,53 +176,61 @@ document.addEventListener('DOMContentLoaded', function() {
                     playerVars: {
                         autoplay: 1,
                         mute: 1,
-                        controls: 0, // No controls
-                        disablekb: 1, // Disable keyboard controls
-                        fs: 0, // No fullscreen button
-                        iv_load_policy: 3, // Don't show annotations
-                        modestbranding: 1, // Minimal YouTube branding
-                        playsinline: 1 // Play inline on iOS
+                        controls: 0,
+                        disablekb: 1,
+                        fs: 0,
+                        iv_load_policy: 3,
+                        modestbranding: 1,
+                        playsinline: 1
                     },
                     events: {
                         'onReady': function(event) {
-                            // Player is ready, but we need to wait for 'playing' state
-                            // Mute again just in case, though playerVar should handle it
+                            console.log("[IFrameAPI] Player event: onReady fired.", event);
                             event.target.mute(); 
                         },
                         'onStateChange': function(event) {
+                            console.log("[IFrameAPI] Player event: onStateChange fired. New state:", event.data);
                             // YT.PlayerState.PLAYING is 1
                             if (event.data === YT.PlayerState.PLAYING) {
-                                // Short delay to allow quality levels to populate
+                                console.log("[IFrameAPI] Player is PLAYING. Setting 750ms timeout to get quality levels.");
                                 setTimeout(() => {
-                                    if (!iframeApiPlayer) return; // Player might have been destroyed by timeout
-
+                                    if (!iframeApiPlayer) {
+                                        console.warn("[IFrameAPI] Inside onStateChange PLAYING timeout, but iframeApiPlayer is null (destroyed by main timeout?). Bailing.");
+                                        return;
+                                    }
+                                    console.log("[IFrameAPI] Attempting to getAvailableQualityLevels().");
                                     const levels = iframeApiPlayer.getAvailableQualityLevels();
-                                    clearTimeout(qualityDetectionTimeout); // Clear the main timeout
+                                    console.log("[IFrameAPI] getAvailableQualityLevels() returned:", levels);
+                                    clearTimeout(qualityDetectionTimeout);
+                                    console.log("[IFrameAPI] Main qualityDetectionTimeout CLEARED.");
 
                                     if (levels && levels.length > 0) {
-                                        const maxQuality = levels[0]; // Highest quality is usually first
-                                        console.log('Max Quality via IFrame API:', maxQuality);
+                                        const maxQuality = levels[0];
+                                        console.log('[IFrameAPI] Max Quality found:', maxQuality, "Resolving promise.");
                                         destroyIframePlayer();
-                                        resolve(maxQuality); // e.g., "hd1080", "hd1440"
+                                        resolve(maxQuality);
                                     } else {
-                                        console.warn('No quality levels found via IFrame API.');
+                                        console.warn('[IFrameAPI] No quality levels found. Resolving promise with null.');
                                         destroyIframePlayer();
-                                        resolve(null); // Resolve with null if no levels found
+                                        resolve(null);
                                     }
-                                }, 750); // Increased delay slightly
+                                }, 750);
                             }
                         },
                         'onError': function(event) {
                             clearTimeout(qualityDetectionTimeout);
-                            console.error('YouTube IFrame API Player Error:', event.data);
+                            console.error('[IFrameAPI] Main qualityDetectionTimeout CLEARED due to player error.');
+                            console.error('[IFrameAPI] Player event: onError fired. Error code:', event.data);
                             destroyIframePlayer();
                             reject('player_error_' + event.data);
                         }
                     }
                 });
+                console.log("[IFrameAPI] YT.Player instance created successfully.");
             } catch (error) {
                 clearTimeout(qualityDetectionTimeout);
-                console.error("Error initializing IFrame API player:", error);
+                console.error("[IFrameAPI] Main qualityDetectionTimeout CLEARED due to init error.");
+                console.error("[IFrameAPI] Error initializing YT.Player:", error);
                 destroyIframePlayer();
                 reject('init_error');
             }
