@@ -22,6 +22,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # Load environment variables from .env file
 load_dotenv()
@@ -29,6 +31,10 @@ load_dotenv()
 # Configure logger
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG if os.environ.get('DEBUG') else logging.INFO)  # Set to DEBUG for detailed logs
+
+# Global dictionary to store download progress and status
+download_tasks = {}
+progress_lock = threading.Lock()
 
 # Helper function to get Chrome path on Render
 def get_chrome_path():
@@ -172,6 +178,83 @@ def parse_size(value_str, unit):
         return v * 1024**3
     return v
 
+# Function to extract video ID (moved here for utility)
+def extract_video_id(url):
+    patterns = [
+        r'(?:youtube(?:-nocookie)?\.com/(?:[^/\\n\\s]+/watch\\S*v=|embed/|v/|shorts/|live/)|youtu\.be/)([\\w-]{11})\',\
+        r'(?:youtube(?:-nocookie)?\.com/(?:[^/\\n\\s]+/watch\\S*v=|embed/|v/|shorts/|live/)|youtu\.be/)([\\w-]{11})\\?\S*si=\S+\''
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+# Function to get video metadata using YouTube Data API v3
+def get_video_metadata_from_api_v3(video_id, api_key):
+    if not api_key:
+        logger.warning("YOUTUBE_API_KEY not provided. Cannot fetch metadata from API v3.")
+        return None
+    try:
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        request = youtube.videos().list(
+            part="snippet,statistics,contentDetails",
+            id=video_id
+        )
+        response = request.execute()
+        if not response.get('items'):
+            logger.warning(f"YouTube Data API v3: No items found for video ID {video_id}")
+            return None
+        
+        item = response['items'][0]
+        snippet = item.get('snippet', {})
+        statistics = item.get('statistics', {})
+        content_details = item.get('contentDetails', {})
+
+        # Get channel logo (requires an additional API call)
+        channel_id = snippet.get('channelId')
+        channel_logo_url = None
+        channel_subscriber_count = None
+        if channel_id:
+            channel_request = youtube.channels().list(
+                part="snippet,statistics", # Add statistics for subscriber count
+                id=channel_id
+            )
+            channel_response = channel_request.execute()
+            if channel_response.get('items'):
+                channel_snippet = channel_response['items'][0].get('snippet', {})
+                channel_logo_url = channel_snippet.get('thumbnails', {}).get('default', {}).get('url')
+                channel_stats = channel_response['items'][0].get('statistics', {})
+                channel_subscriber_count = channel_stats.get('subscriberCount')
+                if channel_subscriber_count:
+                    channel_subscriber_count = int(channel_subscriber_count)
+
+        return {
+            'api_v3_title': snippet.get('title'),
+            'api_v3_uploader': snippet.get('channelTitle'),
+            'api_v3_description': snippet.get('description'),
+            'api_v3_thumbnail_url': snippet.get('thumbnails', {}).get('high', {}) or \
+                                  snippet.get('thumbnails', {}).get('medium', {}) or \
+                                  snippet.get('thumbnails', {}).get('default', {}) or \
+                                  snippet.get('thumbnails', {}).get('standard', {}) or \
+                                  snippet.get('thumbnails', {}).get('maxres', {}).get('url', None),
+            'api_v3_view_count': int(statistics.get('viewCount', 0)) if statistics.get('viewCount') else 0,
+            'api_v3_like_count': int(statistics.get('likeCount', 0)) if statistics.get('likeCount') else 0,
+            'api_v3_duration_iso': content_details.get('duration'), # ISO 8601 format e.g., PT1M3S
+            'api_v3_channel_logo_url': channel_logo_url,
+            'api_v3_channel_subscriber_count': channel_subscriber_count,
+            'info_source': 'api_v3'
+        }
+    except HttpError as e:
+        logger.error(f"YouTube Data API v3 HttpError: {e.content.decode() if e.content else str(e)}")
+        if e.resp.status == 403:
+            if 'quotaExceeded' in str(e.content) or 'keyInvalid' in str(e.content):
+                logger.error("YouTube Data API v3 quota likely exceeded or API key is invalid.")
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching video metadata from YouTube Data API v3: {str(e)}")
+        return None
+
 class YouTubeDownloader:
     def __init__(self, temp_dir):
         """Initialize YouTubeDownloader with a temporary directory"""
@@ -299,524 +382,165 @@ class YouTubeDownloader:
             logger.error(f"Error validating URL: {str(e)}")
             return False
     
-    def _extract_video_id(self, url):
-        """Extract video ID from YouTube URL"""
-        parsed_url = urlparse(url)
-        if parsed_url.netloc in ['www.youtube.com', 'youtube.com']:
-            query = parse_qs(parsed_url.query)
-            if 'v' in query and query['v'][0]:
-                return query['v'][0]
-        elif parsed_url.netloc == 'youtu.be':
-            if parsed_url.path and len(parsed_url.path) > 1:
-                return parsed_url.path[1:]
-        return None
-    
-    def get_video_info(self, url):
-        """Get information about a YouTube video using browser emulation to avoid bot detection"""
-        if not self._is_valid_youtube_url(url):
-            raise ValueError("Invalid YouTube URL")
-        
-        video_id = self._extract_video_id(url)
+    def get_video_info(self, url, use_api_v3=True, api_key=None):
+        video_id = extract_video_id(url)
         if not video_id:
-            raise ValueError("Could not extract video ID from URL")
-        
-        api_key = os.getenv('YOUTUBE_API_KEY')
-        if not api_key:
-            logger.warning("YOUTUBE_API_KEY not found. Channel info will be unavailable.")
+            logger.error(f"Could not extract video_id from URL: {url}")
+            return {'error': 'Invalid YouTube URL'}
 
-        video_info = {}
-        channel_info = {}
-        detailed_formats_available = False
-        info_source = 'api'
-        temp_cookie_file_path = None
+        final_info = {
+            'original_url': url,
+            'video_id': video_id,
+            'title': 'N/A',
+            'uploader': 'N/A',
+            'thumbnail_url': None,
+            'view_count': 0,
+            'like_count': 0,
+            'duration_iso': None, # Will try to get from API v3
+            'channel_logo_url': None,
+            'channel_subscriber_count': 0,
+            'formats': [],
+            'info_source': 'unknown'
+        }
+
+        # Attempt to get metadata from YouTube Data API v3 first
+        api_v3_data = None
+        if use_api_v3 and api_key:
+            logger.info(f"Attempting to fetch metadata from YouTube Data API v3 for video ID: {video_id}")
+            api_v3_data = get_video_metadata_from_api_v3(video_id, api_key)
+            if api_v3_data:
+                final_info.update({
+                    'title': api_v3_data.get('api_v3_title', final_info['title']),
+                    'uploader': api_v3_data.get('api_v3_uploader', final_info['uploader']),
+                    'thumbnail_url': api_v3_data.get('api_v3_thumbnail_url', final_info['thumbnail_url']),
+                    'view_count': api_v3_data.get('api_v3_view_count', final_info['view_count']),
+                    'like_count': api_v3_data.get('api_v3_like_count', final_info['like_count']),
+                    'duration_iso': api_v3_data.get('api_v3_duration_iso', final_info['duration_iso']),
+                    'channel_logo_url': api_v3_data.get('api_v3_channel_logo_url', final_info['channel_logo_url']),
+                    'channel_subscriber_count': api_v3_data.get('api_v3_channel_subscriber_count', final_info['channel_subscriber_count']),
+                    'info_source': 'api_v3'
+                })
+                logger.info(f"Successfully fetched metadata from API v3 for {video_id}")
+            else:
+                logger.warning(f"Failed to fetch metadata from API v3 for {video_id}. Proceeding with yt-dlp only for all info.")
+        else:
+            logger.info("YouTube Data API v3 not used (either disabled or no API key).")
+
+        # Now, use yt-dlp primarily for formats, and as a fallback for metadata if API v3 failed
+        logger.info(f"Attempting to fetch formats (and fallback metadata) using yt-dlp for URL: {url}")
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': 'nested', # Faster for just getting info
+            'forcejson': True,
+            # 'skip_download': True, # Implied by forcejson
+            'simulate': True, # Avoids actual download attempt for info fetching
+            'youtube_skip_dash_manifest': True, # Can speed up things
+            'cachedir': False, # Avoid issues with cache on server environments
+        }
+        # Use proxy if YTDLP_PROXY_URL is set
+        proxy_url = os.environ.get('YTDLP_PROXY_URL')
+        if proxy_url:
+            ydl_opts['proxy'] = proxy_url
+            logger.info(f"Using proxy for yt-dlp: {proxy_url}")
+        else:
+            logger.info("No proxy configured for yt-dlp.")
         
-        # Check if browser emulation is disabled via environment variable
-        browser_disabled = os.environ.get('DISABLE_BROWSER', '').lower() in ('true', '1', 'yes')
-        if browser_disabled:
-            logger.info("Browser emulation disabled by DISABLE_BROWSER environment variable")
-        
-        # Only try browser emulation if it's not disabled
-        if not browser_disabled:
-            driver, chrome_tmp_dir = None, None
+        # Use cookies if YTDLP_COOKIES_CONTENT is set
+        cookies_content = os.environ.get('YTDLP_COOKIES_CONTENT')
+        if cookies_content:
+            temp_cookie_file = None
             try:
-                logger.debug(f"Attempting to fetch info with browser emulation for {url}")
-                
-                # Use our centralized Chrome setup function
-                try:
-                    driver, chrome_tmp_dir = setup_chrome_driver()
-                    
-                    # First visit YouTube homepage to establish a normal session
-                    driver.get("https://www.youtube.com/")
-                    time.sleep(random.uniform(1, 2))  # Shorter random delay to save memory
-                    
-                    # Perform some random scrolling to appear human-like
-                    driver.execute_script(f"window.scrollTo(0, {random.randint(100, 200)});")
-                    time.sleep(random.uniform(0.5, 1))  # Shorter delay
-                    
-                    # Now navigate to the actual video
-                    driver.get(url)
-                    
-                    # Wait for video to load with a longer timeout for slower environments
-                    try:
-                        WebDriverWait(driver, 20).until(
-                            EC.presence_of_element_located((By.ID, "movie_player"))
-                        )
-                        logger.info("Video player loaded successfully")
-                    except Exception as e:
-                        logger.warning(f"Waiting for video player timed out: {e}. Continuing anyway.")
-                    
-                    # Add more realistic interactions
-                    time.sleep(random.uniform(1, 2))  # Shorter delay
-                    
-                    # Get cookies from browser session
-                    cookies = driver.get_cookies()
-                    logger.info(f"Retrieved {len(cookies)} cookies from browser session")
-                    
-                    # Create a temporary cookie file for yt-dlp
-                    try:
-                        with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as tmp_cookie_file:
-                            # Format cookies for yt-dlp
-                            for cookie in cookies:
-                                domain = cookie.get('domain', '')
-                                if domain.startswith('.'):
-                                    domain = domain[1:]
-                                expires = cookie.get('expiry', 0)
-                                secure = cookie.get('secure', False)
-                                httpOnly = cookie.get('httpOnly', False)
-                                tmp_cookie_file.write(f"{domain}\tTRUE\t{cookie.get('path', '/')}\t{str(secure).upper()}\t{expires}\t{cookie.get('name', '')}\t{cookie.get('value', '')}\n")
-                            
-                            temp_cookie_file_path = tmp_cookie_file.name
-                            logger.info(f"Created cookie file from browser session: {temp_cookie_file_path}")
-                    except Exception as cookie_error:
-                        logger.error(f"Error creating cookie file: {cookie_error}")
-                        temp_cookie_file_path = None
-                    
-                    # Force garbage collection to free memory
-                    driver.execute_script("window.gc();")
-                    
-                    # Now use yt-dlp with the browser session cookies
-                    ydl_opts = {
-                        'quiet': True, 
-                        'no_warnings': True, 
-                        'skip_download': True,
-                        'forceid': True, 
-                        'extract_flat': 'discard_in_playlist',
-                    }
-                    
-                    if temp_cookie_file_path:
-                        ydl_opts['cookiefile'] = temp_cookie_file_path
-                    
-                    # Add proxy if available
-                    proxy_url = os.getenv('YTDLP_PROXY_URL')
-                    if proxy_url:
-                        ydl_opts['proxy'] = proxy_url
-                    
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        raw_info = ydl.extract_info(url, download=False)
-                    
-                    if raw_info:
-                        # Process video info
-                        video_info['title'] = raw_info.get('title', 'Unknown Title')
-                        video_info['uploader'] = raw_info.get('uploader', 'Unknown Uploader')
-                        video_info['duration'] = raw_info.get('duration', 0)
-                        video_info['view_count'] = raw_info.get('view_count', 0)
-                        video_info['like_count'] = raw_info.get('like_count', 0)
-                        video_info['video_id'] = raw_info.get('id', video_id)
-                        video_info['channel_id'] = raw_info.get('channel_id')
-                        
-                        # Process formats
-                        raw_formats = raw_info.get('formats', [])
-                        processed_formats = []
-                        
-                        # Process audio formats
-                        audio_formats_yt_dlp = [f for f in raw_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
-                        if audio_formats_yt_dlp:
-                            best_audio = max(audio_formats_yt_dlp, key=lambda f: f.get('tbr', 0) or f.get('abr', 0), default=None)
-                            if best_audio:
-                                processed_formats.append({
-                                    'format_id': best_audio.get('format_id'), 'resolution': 'Audio Only', 'fps': None, 
-                                    'filesize': best_audio.get('filesize') or best_audio.get('filesize_approx'),
-                                    'ext': best_audio.get('ext'), 'note': best_audio.get('format_note', 'Best Audio')
-                                })
-                        
-                        # Process video formats with improved resolution detection
-                        video_only_formats = []
-                        merged_formats = []
-                        
-                        # First pass to identify all available formats
-                        for f_item in raw_formats:
-                            if f_item.get('vcodec') != 'none':
-                                # Get resolution in consistent format
-                                width = f_item.get('width')
-                                height = f_item.get('height')
-                                
-                                if not width or not height:
-                                    # Try to extract from resolution string
-                                    resolution_str = f_item.get('resolution')
-                                    if resolution_str and 'x' in resolution_str:
-                                        try:
-                                            width_str, height_str = resolution_str.split('x')
-                                            width = int(width_str)
-                                            height = int(height_str)
-                                        except (ValueError, TypeError):
-                                            continue
-                                    else:
-                                        continue
-                                
-                                # Format resolution consistently
-                                res = f"{width}x{height}"
-                                
-                                # Create format entry
-                                fmt_entry = {
-                                    'format_id': f_item.get('format_id'), 
-                                    'resolution': res,
-                                    'fps': f_item.get('fps'), 
-                                    'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 
-                                    'ext': f_item.get('ext'),
-                                    'note': f_item.get('format_note', f"{height}p"),
-                                    'width': width,
-                                    'height': height
-                                }
-                                
-                                # Categorize as video-only or merged format
-                                if f_item.get('acodec') != 'none': 
-                                    merged_formats.append(fmt_entry)
-                                else: 
-                                    video_only_formats.append(fmt_entry)
-                        
-                        # Create categorized formats list with proper quality labeling
-                        processed_video_formats = []
-                        
-                        # Add merged formats first (these have audio built-in)
-                        if merged_formats:
-                            # Sort by height and fps
-                            sorted_merged = sorted(merged_formats, 
-                                key=lambda x: (x.get('height', 0), x.get('fps', 0)), 
-                                reverse=True)
-                            processed_video_formats.extend(sorted_merged)
-                        
-                        # Add video-only formats 
-                        if video_only_formats:
-                            # Sort by height and fps
-                            sorted_video_only = sorted(video_only_formats, 
-                                key=lambda x: (x.get('height', 0), x.get('fps', 0)), 
-                                reverse=True)
-                            processed_video_formats.extend(sorted_video_only)
-                        
-                        # Extend the main formats list
-                        processed_formats.extend(processed_video_formats)
-                        
-                        if processed_formats:
-                            video_info['formats'] = processed_formats
-                            detailed_formats_available = True
-                            info_source = 'browser+yt-dlp'
-                            logger.info(f"Successfully fetched detailed info with browser emulation for {url}")
-                        else:
-                            logger.warning(f"Browser+yt-dlp provided info but no usable formats for {url}. Falling back to API.")
-                except Exception as browser_error:
-                    logger.error(f"Error during browser setup or navigation: {browser_error}")
-                finally:
-                    # Close the browser
-                    if driver:
-                        driver.quit()
-                        logger.info("Browser session closed")
-                    
-                    # Clean up temporary directory
-                    if chrome_tmp_dir and os.path.exists(chrome_tmp_dir):
-                        try:
-                            shutil.rmtree(chrome_tmp_dir)
-                            logger.info(f"Removed Chrome temporary directory: {chrome_tmp_dir}")
-                        except Exception as tmp_dir_error:
-                            logger.error(f"Error removing Chrome temporary directory: {tmp_dir_error}")
-                    
-                    # Clean up temporary cookie file
-                    if temp_cookie_file_path and os.path.exists(temp_cookie_file_path):
-                        try:
-                            os.remove(temp_cookie_file_path)
-                            logger.info(f"Removed temporary cookie file: {temp_cookie_file_path}")
-                        except Exception as cookie_error:
-                            logger.error(f"Error removing temporary cookie file: {cookie_error}")
+                # Create a temporary file for cookies
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as tmp_file:
+                    tmp_file.write(cookies_content)
+                    temp_cookie_file = tmp_file.name
+                ydl_opts['cookiefile'] = temp_cookie_file
+                logger.info(f"Using cookies for yt-dlp from temporary file: {temp_cookie_file}")
             except Exception as e:
-                logger.error(f"Browser emulation failed for {url}: {e}. Falling back to regular yt-dlp.")
+                logger.error(f"Error creating/using temporary cookie file: {e}")
+                if temp_cookie_file and os.path.exists(temp_cookie_file):
+                    os.remove(temp_cookie_file)
+                temp_cookie_file = None # Ensure it's None if setup failed
         else:
-            logger.info("Skipping browser emulation as it's disabled, using yt-dlp directly")
-            
-        # At this point, either browser emulation has failed or was skipped
-        # Fall back to regular yt-dlp method
-        temp_cookie_file_path = None
-        proxy_url = os.getenv('YTDLP_PROXY_URL')
-        
+            logger.info("No cookies configured for yt-dlp via YTDLP_COOKIES_CONTENT.")
+
+        yt_dlp_error = None
         try:
-            logger.debug(f"Attempting fallback to direct yt-dlp for {url}")
-            ydl_opts = {
-                'quiet': True, 'no_warnings': True, 'skip_download': True,
-                'forceid': True, 'extract_flat': 'discard_in_playlist',
-            }
-            cookies_content = os.getenv('YTDLP_COOKIES_CONTENT')
-            if cookies_content:
-                try:
-                    with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as tmp_cookie_file:
-                        tmp_cookie_file.write(cookies_content)
-                        temp_cookie_file_path = tmp_cookie_file.name
-                    ydl_opts['cookiefile'] = temp_cookie_file_path
-                    logger.info(f"Using temporary cookie file for yt-dlp fallback: {temp_cookie_file_path}")
-                except Exception as e:
-                    logger.error(f"Error creating or writing temporary cookie file: {e}")
-            else:
-                logger.info("No YTDLP_COOKIES_CONTENT. Proceeding without cookie file for yt-dlp fallback.")
-            
-            if proxy_url:
-                ydl_opts['proxy'] = proxy_url
-                logger.info(f"Using proxy for yt-dlp fallback: {proxy_url}")
-            else:
-                logger.info("No YTDLP_PROXY_URL. Proceeding without proxy for yt-dlp fallback.")
-
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                raw_info = ydl.extract_info(url, download=False)
+                info_dict = ydl.extract_info(url, download=False)
             
-            # Process raw_info the same as in the browser approach
-            if raw_info:
-                # Process video info (same as browser approach)
-                video_info['title'] = raw_info.get('title', 'Unknown Title')
-                video_info['uploader'] = raw_info.get('uploader', 'Unknown Uploader')
-                video_info['duration'] = raw_info.get('duration', 0)
-                video_info['view_count'] = raw_info.get('view_count', 0)
-                video_info['like_count'] = raw_info.get('like_count', 0)
-                video_info['video_id'] = raw_info.get('id', video_id)
-                video_info['channel_id'] = raw_info.get('channel_id')
-                raw_thumbnails = raw_info.get('thumbnails', [])
-                thumbnails = []
-                for thumb in raw_thumbnails:
-                    thumbnails.append({'url': thumb.get('url'), 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
-                video_info['thumbnails'] = sorted(thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
-                
-                raw_formats = raw_info.get('formats', [])
-                processed_formats = []
-                audio_formats_yt_dlp = [f for f in raw_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
-                if audio_formats_yt_dlp:
-                    best_audio = max(audio_formats_yt_dlp, key=lambda f: f.get('tbr', 0) or f.get('abr', 0), default=None)
-                    if best_audio:
-                        processed_formats.append({
-                            'format_id': best_audio.get('format_id'), 'resolution': 'Audio Only', 'fps': None, 
-                            'filesize': best_audio.get('filesize') or best_audio.get('filesize_approx'),
-                            'ext': best_audio.get('ext'), 'note': best_audio.get('format_note', 'Best Audio')
-                        })
-                
-                # Process video formats with improved resolution detection
-                video_only_formats = []
-                merged_formats = []
-                
-                # First pass to identify all available formats
-                for f_item in raw_formats:
-                    if f_item.get('vcodec') != 'none':
-                        # Get resolution in consistent format
-                        width = f_item.get('width')
-                        height = f_item.get('height')
-                        
-                        if not width or not height:
-                            # Try to extract from resolution string
-                            resolution_str = f_item.get('resolution')
-                            if resolution_str and 'x' in resolution_str:
-                                try:
-                                    width_str, height_str = resolution_str.split('x')
-                                    width = int(width_str)
-                                    height = int(height_str)
-                                except (ValueError, TypeError):
-                                    continue
-                            else:
-                                continue
-                        
-                        # Format resolution consistently
-                        res = f"{width}x{height}"
-                        
-                        # Create format entry
-                        fmt_entry = {
-                            'format_id': f_item.get('format_id'), 
-                            'resolution': res, 
-                            'fps': f_item.get('fps'), 
-                            'filesize': f_item.get('filesize') or f_item.get('filesize_approx'), 
-                            'ext': f_item.get('ext'),
-                            'note': f_item.get('format_note', f"{height}p"),
-                            'width': width,
-                            'height': height
-                        }
-                        
-                        # Categorize as video-only or merged format
-                        if f_item.get('acodec') != 'none': 
-                            merged_formats.append(fmt_entry)
-                        else: 
-                            video_only_formats.append(fmt_entry)
-                
-                # Create categorized formats list with proper quality labeling
-                processed_video_formats = []
-                
-                # Add merged formats first (these have audio built-in)
-                if merged_formats:
-                    # Sort by height and fps
-                    sorted_merged = sorted(merged_formats, 
-                        key=lambda x: (x.get('height', 0), x.get('fps', 0)), 
-                        reverse=True)
-                    processed_video_formats.extend(sorted_merged)
-                
-                # Add video-only formats 
-                if video_only_formats:
-                    # Sort by height and fps
-                    sorted_video_only = sorted(video_only_formats, 
-                        key=lambda x: (x.get('height', 0), x.get('fps', 0)), 
-                        reverse=True)
-                    processed_video_formats.extend(sorted_video_only)
-                
-                # Extend the main formats list
-                processed_formats.extend(processed_video_formats)
-                
-                if processed_formats:
-                    video_info['formats'] = processed_formats
-                    detailed_formats_available = True
-                    info_source = 'yt-dlp'
-                    logger.info(f"Successfully fetched detailed info with direct yt-dlp for {url}")
-                else:
-                    logger.warning(f"yt-dlp provided info but no usable formats for {url}. Falling back to API.")
-        except yt_dlp.utils.DownloadError as e:
-            logger.warning(f"yt-dlp DownloadError for {url} (Proxy: {proxy_url if proxy_url else 'N/A'}): {e}. Falling back to API.")
-        except Exception as e:
-            logger.error(f"Unexpected error during yt-dlp for {url} (Proxy: {proxy_url if proxy_url else 'N/A'}): {e}. Falling back to API.")
-        finally:
-            if temp_cookie_file_path and os.path.exists(temp_cookie_file_path):
-                try:
-                    os.remove(temp_cookie_file_path)
-                    logger.info(f"Removed temporary cookie file: {temp_cookie_file_path}")
-                except Exception as e:
-                    logger.error(f"Error removing temporary cookie file {temp_cookie_file_path}: {e}")
-        
-        # API Fallback for both browser and direct yt-dlp approaches
-        if not detailed_formats_available:
-            logger.debug(f"Fetching base video info via YouTube API for {video_id}")
-            if not api_key:
-                raise ValueError("YOUTUBE_API_KEY not found, and both browser and yt-dlp approaches failed to provide info.")
-            try:
-                video_api_url = 'https://www.googleapis.com/youtube/v3/videos'
-                video_params = {'part': 'snippet,contentDetails,statistics', 'id': video_id, 'key': api_key}
-                resp = requests.get(video_api_url, params=video_params, timeout=10)
-                resp.raise_for_status()
-                video_data = resp.json()
-                if not video_data.get('items'):
-                    raise ValueError(f"Video not found via API: {video_data.get('error', {}).get('message', 'Unknown API error')}")
-                item = video_data['items'][0]
-                video_info.setdefault('title', item['snippet'].get('title', 'Unknown Title'))
-                video_info.setdefault('uploader', item['snippet'].get('channelTitle', 'Unknown Uploader'))
-                video_info.setdefault('channel_id', item['snippet'].get('channelId'))
-                duration_iso = item['contentDetails'].get('duration', 'PT0S')
-                duration_seconds = 0
-                if duration_iso.startswith('PT'):
-                    temp_duration_api = duration_iso[2:]
-                    if 'H' in temp_duration_api: parts = temp_duration_api.split('H'); duration_seconds += int(parts[0]) * 3600; temp_duration_api = parts[1] if len(parts) > 1 else ''
-                    if 'M' in temp_duration_api: parts = temp_duration_api.split('M'); duration_seconds += int(parts[0]) * 60; temp_duration_api = parts[1] if len(parts) > 1 else ''
-                    if 'S' in temp_duration_api: duration_seconds += int(temp_duration_api.replace('S', ''))
-                video_info.setdefault('duration', duration_seconds)
-                video_info.setdefault('view_count', int(item['statistics'].get('viewCount', 0)))
-                video_info.setdefault('like_count', int(item['statistics'].get('likeCount', 0)))
-                
-                # Get thumbnails for both quality detection and thumbnails list
-                thumbnails_data = item['snippet'].get('thumbnails', {})
-                
-                # Process thumbnails if needed
-                if not video_info.get('thumbnails'): 
-                    api_thumbnails = []
-                    for quality_key in ['maxres', 'standard', 'high', 'medium', 'default']:
-                        if quality_key in thumbnails_data:
-                            thumb = thumbnails_data[quality_key]
-                            api_thumbnails.append({'url': thumb['url'], 'width': thumb.get('width',0), 'height': thumb.get('height',0)})
-                    video_info['thumbnails'] = sorted(api_thumbnails, key=lambda t: t.get('width',0) * t.get('height',0), reverse=True)
-                
-                video_info.setdefault('video_id', video_id)
-                
-                # Detect highest quality based on available thumbnails and definition field
-                max_quality = "SD"
-                quality_height = 480
-                
-                # Check for maxres thumbnail - YouTube provides these only for videos with 1080p or higher resolution
-                if 'maxres' in thumbnails_data:
-                    max_quality = "FULLHD"
-                    quality_height = 1080
-                
-                # Check definition from contentDetails for better resolution info
-                definition = item['contentDetails'].get('definition', 'sd')
-                if definition == 'hd':
-                    if max_quality == "SD":
-                        max_quality = "HD"
-                        quality_height = 720
-                
-                # Check for higher definition based on maxres thumbnail dimensions
-                if 'maxres' in thumbnails_data:
-                    maxres_thumb = thumbnails_data['maxres']
-                    maxres_height = maxres_thumb.get('height', 0)
-                    if maxres_height >= 2160:
-                        max_quality = "4K"
-                        quality_height = 2160
-                    elif maxres_height >= 1440:
-                        max_quality = "2K"
-                        quality_height = 1440
-                
-                # Create API formats with detailed quality information
-                api_formats = [
-                    {
-                        'format_id': 'best_video_api', 
-                        'resolution': f'Best Video Available ({max_quality})', 
-                        'note': f'Best Video ({max_quality}) (API Fallback)', 
-                        'ext': 'mp4',
-                        'height': quality_height
-                    },
-                    {
-                        'format_id': 'best_audio_api', 
-                        'resolution': 'Audio Only', 
-                        'note': 'Audio (API Fallback)', 
-                        'ext': 'm4a'
-                    }
-                ]
-                
-                video_info['formats'] = api_formats
-                info_source = 'api'
-                logger.info(f"Fetched basic info via YouTube API for {video_id} (browser and yt-dlp fallback). Quality detected: {max_quality}")
-            except requests.exceptions.RequestException as e:
-                logger.error(f"API request error (browser and yt-dlp also failed): {e}")
-                raise ValueError(f"Could not fetch video from YouTube API (browser and yt-dlp also failed): {e}")
-            except (KeyError, IndexError, ValueError) as e:
-                logger.error(f"API parsing error (browser and yt-dlp also failed): {e}")
-                raise ValueError(f"Error processing API data (browser and yt-dlp also failed): {e}")
-        
-        # Channel info fetching - same as before
-        current_channel_id = video_info.get('channel_id')
-        if current_channel_id and api_key:
-            try:
-                channel_api_url = 'https://www.googleapis.com/youtube/v3/channels'
-                channel_params = {'part': 'snippet,statistics', 'id': current_channel_id, 'key': api_key}
-                resp = requests.get(channel_api_url, params=channel_params, timeout=10)
-                resp.raise_for_status()
-                channel_data = resp.json()
-                if channel_data.get('items'):
-                    ch_item = channel_data['items'][0]
-                    sub_count_raw = ch_item['statistics'].get('subscriberCount')
-                    if ch_item['statistics'].get('hiddenSubscriberCount') is False and sub_count_raw is not None:
-                        channel_info['subscriber_count'] = int(sub_count_raw)
-                    elif ch_item['statistics'].get('hiddenSubscriberCount') is True: channel_info['subscriber_count'] = 'Hidden'
-                    else: channel_info['subscriber_count'] = 'N/A'
-                    ch_thumbnails_data = ch_item['snippet'].get('thumbnails', {})
-                    if 'default' in ch_thumbnails_data: channel_info['channel_logo'] = ch_thumbnails_data['default']['url']
-                else: channel_info['subscriber_count'] = 'N/A'
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"API request error for channel details: {e}.")
-                channel_info.setdefault('subscriber_count', 'N/A')
-            except (KeyError, IndexError, ValueError) as e:
-                logger.warning(f"Error parsing channel API response: {e}.")
-                channel_info.setdefault('subscriber_count', 'N/A')
-        else:
-            channel_info.setdefault('subscriber_count', 'N/A')
-            if not api_key and current_channel_id: logger.warning("Cannot fetch channel: YOUTUBE_API_KEY missing.")
-            elif not current_channel_id: logger.warning("Cannot fetch channel: channel_id missing.")
+            # If API v3 didn't provide info, or to supplement, update with yt-dlp info
+            if not api_v3_data or final_info['info_source'] != 'api_v3':
+                final_info['title'] = info_dict.get('title', final_info['title'])
+                final_info['uploader'] = info_dict.get('uploader', final_info['uploader'])
+                final_info['thumbnail_url'] = info_dict.get('thumbnail', final_info['thumbnail_url'])
+                final_info['view_count'] = info_dict.get('view_count', final_info['view_count'])
+                final_info['like_count'] = info_dict.get('like_count', final_info['like_count'])
+                # yt-dlp provides duration in seconds, API v3 in ISO format. Prefer API v3 if available.
+                if not final_info['duration_iso'] and info_dict.get('duration'):
+                    # Convert yt-dlp seconds to ISO 8601 (basic PT%dS form)
+                    final_info['duration_iso'] = f"PT{int(info_dict['duration'])}S"
+                if not final_info['channel_logo_url'] and info_dict.get('channel_thumbnail_url'): # yt-dlp might have different field name
+                    final_info['channel_logo_url'] = info_dict.get('channel_thumbnail_url')
+                if not final_info['channel_subscriber_count'] and info_dict.get('channel_follower_count'):
+                    final_info['channel_subscriber_count'] = info_dict.get('channel_follower_count')
+                final_info['info_source'] = 'yt-dlp' if final_info['info_source'] == 'unknown' else 'api_v3_plus_yt-dlp_fallback'
 
-        result = {**video_info, **channel_info, 'info_source': info_source}
-        logger.debug(f"Final video info for '{result.get('title')}': Source: {info_source}, Formats: {len(result.get('formats', []))}")
-        return result
+            # Always get formats from yt-dlp
+            formats = info_dict.get('formats', [])
+            processed_formats = []
+            for f in formats:
+                # Basic filtering for usable formats
+                if not f.get('url') or not f.get('ext'): continue # Skip if no download URL or extension
+                if f.get('acodec') == 'none' and f.get('vcodec') == 'none': continue # Skip if no audio and no video
+
+                processed_formats.append({
+                    'format_id': f.get('format_id'),
+                    'ext': f.get('ext'),
+                    'resolution': f.get('resolution', 'audio' if f.get('vcodec') == 'none' else 'unknown'),
+                    'fps': f.get('fps'),
+                    'note': f.get('format_note', f.get('resolution') or ''),
+                    'filesize': f.get('filesize', f.get('filesize_approx') or 0),
+                    'has_audio': f.get('acodec') != 'none',
+                    'has_video': f.get('vcodec') != 'none'
+                })
+            final_info['formats'] = processed_formats
+            if final_info['info_source'] == 'api_v3': # If API v3 was primary and formats were added
+                final_info['info_source'] = 'api_v3_plus_yt-dlp_formats'
+            logger.info(f"Successfully fetched formats from yt-dlp for {url}")
+
+        except yt_dlp.utils.DownloadError as e:
+            yt_dlp_error = str(e)
+            logger.warning(f"yt-dlp DownloadError for {url} (Proxy: {proxy_url if proxy_url else 'N/A'}): {yt_dlp_error}. ")
+            if final_info['info_source'] == 'api_v3':
+                logger.warning("API v3 provided metadata, but yt-dlp failed to get formats. Proceeding with API v3 metadata only.")
+                final_info['info_source'] = 'api_v3_no_formats_yt-dlp_failed'
+            else:
+                logger.error("Both API v3 and yt-dlp failed to get comprehensive info.")
+                final_info['info_source'] = 'yt-dlp_failed'
+                # Do not return error immediately; return partial info if API v3 worked.
+                # If API v3 also failed, final_info will be mostly N/A.
+            final_info['yt_dlp_error'] = yt_dlp_error # Add error to response for frontend to know
+        except Exception as e:
+            yt_dlp_error = str(e)
+            logger.error(f"Generic error using yt-dlp for {url}: {yt_dlp_error}")
+            final_info['info_source'] = 'yt-dlp_exception'
+            final_info['yt_dlp_error'] = yt_dlp_error
+        finally:
+            if 'temp_cookie_file' in locals() and temp_cookie_file and os.path.exists(temp_cookie_file):
+                try:
+                    os.remove(temp_cookie_file)
+                    logger.info(f"Removed temporary cookie file: {temp_cookie_file}")
+                except Exception as e_rm:
+                    logger.error(f"Error removing temporary cookie file {temp_cookie_file}: {e_rm}")
+        
+        if not final_info['formats'] and not api_v3_data and yt_dlp_error:
+            # If both failed completely and we have a yt-dlp error, make it the main error
+            return {'error': f"Failed to retrieve video information. yt-dlp: {yt_dlp_error}"}
+        
+        logger.debug(f"Final video info for {url} (Source: {final_info['info_source']}): {final_info}")
+        return final_info
     
     def _download_thread(self, download_id, url, format_type, quality):
         """Download thread function for background download processing"""
@@ -940,8 +664,8 @@ class YouTubeDownloader:
                     if not str(height).isnumeric() and quality not in ['best', 'worst']:
                         format_str = quality # Use the format ID directly
                     else:
-                        # Select video at the requested resolution plus best audio stream
-                        format_str = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
+                    # Select video at the requested resolution plus best audio stream
+                    format_str = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
                 
                 logger.debug(f"Using format string: {format_str}")
                 

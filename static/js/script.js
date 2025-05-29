@@ -301,7 +301,47 @@ document.addEventListener('DOMContentLoaded', function() {
         currentVideoInfo = null;
         currentDownloadId = null;
     }
-    
+
+    // Function to display video details on the card
+    function displayVideoDetails(data) {
+        if (!data) {
+            console.error("displayVideoDetails called with no data");
+            // Optionally show an error or clear fields if data is unexpectedly null/undefined
+            videoTitle.textContent = 'Error loading title';
+            videoUploader.textContent = 'N/A';
+            if (channelLogo) channelLogo.style.display = 'none';
+            thumbnailContainer.innerHTML = '<i class="bi bi-image-alt text-secondary" style="font-size: 3rem;"></i>'; // Placeholder
+            videoViews.textContent = '0 views';
+            videoLikes.textContent = '0 likes';
+            channelSubscribers.textContent = '0 subscribers';
+            return;
+        }
+
+        videoTitle.textContent = data.title || 'No title available';
+        videoUploader.textContent = data.uploader || 'Uploader N/A';
+
+        if (data.channel_logo_url && channelLogo) {
+            channelLogo.src = data.channel_logo_url;
+            channelLogo.alt = data.uploader ? `${data.uploader} Logo` : 'Channel Logo';
+            channelLogo.style.display = 'inline-block';
+        } else if (channelLogo) {
+            channelLogo.style.display = 'none';
+        }
+
+        if (data.thumbnail_url) {
+            thumbnailContainer.innerHTML = `<img src="${data.thumbnail_url}" class="img-fluid rounded" alt="Video Thumbnail" style="object-fit: cover; width: 100%; height: 100%;">`;
+        } else {
+            thumbnailContainer.innerHTML = '<i class="bi bi-image-alt text-secondary" style="font-size: 3rem;"></i>'; // Placeholder image icon
+        }
+
+        videoViews.textContent = data.view_count ? formatViewCount(data.view_count) : 'Views N/A';
+        videoLikes.textContent = data.like_count ? `${data.like_count.toLocaleString()} likes` : 'Likes N/A';
+        channelSubscribers.textContent = data.channel_subscriber_count ? `${data.channel_subscriber_count.toLocaleString()} subscribers` : 'Subscribers N/A';
+        
+        // Ensure the video info card is visible
+        videoInfoCard.classList.remove('d-none');
+    }
+
     // Update the quality select based on format
     function updateQualityOptions() {
         const format = formatSelect.value;
@@ -490,7 +530,7 @@ document.addEventListener('DOMContentLoaded', function() {
             updateLoadingStatus('Failed to extract video ID.', false);
             return;
         }
-
+        
         updateLoadingStatus('Detecting max quality via IFrame API (max 15s)...');
         let iframeQualityLabel = null;
         try {
@@ -518,8 +558,8 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             // Match backend: /api/video-info (hyphen) and POST method
             const response = await fetchWithTimeout('/api/video-info', { 
-                method: 'POST',
-                headers: {
+            method: 'POST',
+            headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ url: url }) 
