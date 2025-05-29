@@ -341,7 +341,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Ensure the video info card is visible
         videoInfoCard.classList.remove('d-none');
     }
-
+    
     // Update the quality select based on format
     function updateQualityOptions() {
         const format = formatSelect.value;
@@ -482,7 +482,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (['4K', '2K'].includes(maxQualityLabel) || maxHeight >= 1440) {
                          bestQualityInfo.innerHTML = `<strong class="text-success">High resolution ${maxQualityLabel} available!</strong>`;
                     }
-            } else {
+                } else {
                     bestQualityInfo.textContent = 'Could not determine specific maximum quality from available formats.';
                 }
             }
@@ -522,6 +522,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
     async function fetchVideoInfo(url) {
         resetUI();
+        
+        // Disable button and input while loading
+        if (fetchInfoBtn) {
+            fetchInfoBtn.disabled = true;
+            fetchInfoBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...';
+        }
+        if (youtubeUrlInput) youtubeUrlInput.disabled = true;
+        
         updateLoadingStatus('Extracting video ID...');
         const videoId = extractVideoId(url);
 
@@ -587,6 +595,10 @@ document.addEventListener('DOMContentLoaded', function() {
             currentVideoInfo = data;
 
             if (data.error) {
+                // Special handling for API key errors
+                if (data.error.includes('API key') || data.error.includes('API v3') || data.error.includes('YouTube Data API')) {
+                    throw new Error(`YouTube API Error: ${data.error}. The server may be missing a valid YouTube API key.`);
+                }
                 throw new Error(data.error);
             }
             
@@ -604,7 +616,24 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 displayVideoDetails(data); 
                 updateQualityOptions();    
-                if (downloadButton) downloadButton.disabled = false;
+                if (downloadBtn) downloadBtn.disabled = false;
+                
+                // Show API source info if available (API v3, yt-dlp, or fallback)
+                if (bestQualityInfo && data.info_source) {
+                    let sourceInfo = "";
+                    if (data.info_source.includes('api_v3')) {
+                        sourceInfo = "(YouTube Data API)";
+                    } else if (data.info_source.includes('yt-dlp')) {
+                        sourceInfo = "(yt-dlp fallback)";
+                        if (data.yt_dlp_error) {
+                            sourceInfo += " - Some data may be limited";
+                        }
+                    }
+                    if (sourceInfo && !bestQualityInfo.textContent.includes(sourceInfo)) {
+                        bestQualityInfo.textContent += " " + sourceInfo;
+                    }
+                }
+                
                 const loadingSpinnerContainer = document.getElementById('loading-spinner-container');
                 if(loadingSpinnerContainer) loadingSpinnerContainer.innerHTML = ''; 
             }
@@ -621,11 +650,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 updateQualityOptions(); 
             }
         } finally {
-            if (submitButton) {
-                submitButton.disabled = false;
-                submitButton.innerHTML = 'Fetch Info'; 
+            if (fetchInfoBtn) {
+                fetchInfoBtn.disabled = false;
+                fetchInfoBtn.innerHTML = 'Fetch Info'; 
             }
-            if (urlInput) urlInput.disabled = false;
+            if (youtubeUrlInput) youtubeUrlInput.disabled = false;
             
             if (!currentVideoInfo && videoInfoCard.classList.contains('d-none') === false) {
                  if (!videoInfoCard.querySelector('.video-details-grid')) { 
