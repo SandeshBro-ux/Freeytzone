@@ -177,49 +177,47 @@ def fetch_info():
         return jsonify({'error': 'Invalid YouTube URL'}), 400
 
     cookies_file_path = None
-    info_dict = None # Initialize info_dict
+    info_dict = None
+    encountered_429 = False # Flag to track if a 429 was seen
 
     try:
         cookies_file_path = create_cookie_file(cookies_content, f"fetch_{video_id}")
         
-        ydl_opts = {
-            'cookiefile': cookies_file_path,
+        # It's good practice to set common ydl_opts once
+        base_ydl_opts = {
             'noplaylist': True,
-            'quiet': False, # Let's get more verbose output for a bit for debugging on Render
+            'quiet': False, 
             'no_warnings': False,
             'skip_download': True,
-            'forcejson': True, # Try to force JSON output
-            'youtube_skip_dash_manifest': True, # May help with some 429s
-            # 'source_address': '0.0.0.0', # This is for binding, not useful for outgoing IP on Render
+            'forcejson': True,
+            'youtube_skip_dash_manifest': True,
+            # Consider adding a general user-agent to all yt-dlp calls
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        
+
         # Attempt 1: With cookies (if provided)
         if cookies_file_path:
             print(f"Attempting to fetch info for {url} WITH cookies: {cookies_file_path}")
+            ydl_opts_with_cookies = base_ydl_opts.copy()
+            ydl_opts_with_cookies['cookiefile'] = cookies_file_path
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with yt_dlp.YoutubeDL(ydl_opts_with_cookies) as ydl:
                     info_dict = ydl.extract_info(url, download=False)
             except yt_dlp.utils.DownloadError as err:
                 error_str = str(err).lower()
                 print(f"yt-dlp DownloadError WITH cookies: {error_str}")
                 if "http error 429" in error_str or "too many requests" in error_str:
-                    # If rate-limited with cookies, it's a persistent issue. Advise user.
-                    # Clean up cookie file before returning early
-                    if cookies_file_path and os.path.exists(cookies_file_path):
-                        try: os.remove(cookies_file_path)
-                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
-                    return jsonify({'error': 'YouTube is rate-limiting requests from this server, even with cookies. Please try again later.'}), 429
-                # For other errors with cookies, we might still try without, or propagate error
-                info_dict = None # Ensure info_dict is None to trigger next step if applicable
+                    encountered_429 = True
+                info_dict = None 
             except Exception as e_generic:
                 print(f"Generic yt-dlp error WITH cookies: {e_generic}")
                 info_dict = None
 
-        # Attempt 2: Without cookies (if no cookies provided OR first attempt failed for a non-429 reason and info_dict is still None)
-        if not info_dict: 
+        # Attempt 2: Without cookies (if no cookies used OR first attempt failed)
+        if not info_dict:
             print(f"Attempting to fetch info for {url} WITHOUT cookies.")
-            ydl_opts_no_cookies = ydl_opts.copy()
-            ydl_opts_no_cookies['cookiefile'] = None
+            ydl_opts_no_cookies = base_ydl_opts.copy()
+            ydl_opts_no_cookies['cookiefile'] = None # Explicitly ensure no cookie file
             try:
                 with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl2:
                     info_dict = ydl2.extract_info(url, download=False)
@@ -227,31 +225,24 @@ def fetch_info():
                 error_str = str(err_no_cookies).lower()
                 print(f"yt-dlp DownloadError WITHOUT cookies: {error_str}")
                 if "http error 429" in error_str or "too many requests" in error_str:
-                    # Clean up cookie file before returning early
-                    if cookies_file_path and os.path.exists(cookies_file_path):
-                        try: os.remove(cookies_file_path)
-                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
-                    return jsonify({'error': 'YouTube is rate-limiting requests from this server. Please provide cookies or try again later.'}), 429
-                # For other errors, this is our last yt-dlp attempt for info
-                if cookies_file_path and os.path.exists(cookies_file_path):
-                    try: os.remove(cookies_file_path)
-                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
-                return jsonify({'error': f'Failed to fetch video info after multiple attempts: {error_str}'}), 500
+                    encountered_429 = True
+                # If this fails, this is our final yt-dlp error for info
+                # The jsonify below will handle the encountered_429 flag
             except Exception as e_generic_no_cookies:
                 print(f"Generic yt-dlp error WITHOUT cookies: {e_generic_no_cookies}")
-                if cookies_file_path and os.path.exists(cookies_file_path):
-                    try: os.remove(cookies_file_path)
-                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
-                return jsonify({'error': f'A server error occurred: {e_generic_no_cookies}'}), 500
-            
+                # Let the generic error handling catch this if info_dict is still None
+        
+        # Check results after all attempts
         if not info_dict:
-            # This should ideally be caught by the error handling above, but as a safeguard:
-            if cookies_file_path and os.path.exists(cookies_file_path):
-                try: os.remove(cookies_file_path)
-                except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
-            return jsonify({'error': 'Could not fetch video information from yt-dlp.'}), 500
-            
-        # --- Proceed with processing info_dict --- 
+            # If a 429 error was encountered at any point, prioritize that message
+            if encountered_429:
+                return jsonify({'error': 'YouTube is rate-limiting requests from this server. Please provide cookies or try again much later.'}), 429
+            else:
+                # If no 429, but still no info_dict, return a generic yt-dlp failure
+                return jsonify({'error': 'Failed to fetch video info from yt-dlp after all attempts. The content may be unavailable or private.'}), 500
+
+        # --- If we got here, info_dict should be populated --- 
+        
         formats = info_dict.get('formats', [])
         
         ydl_max_height = 0  # Renamed from actual_max_height
