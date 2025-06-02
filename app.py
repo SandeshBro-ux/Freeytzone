@@ -20,12 +20,19 @@ app.config['UPLOAD_FOLDER'] = 'cookies'
 app.config['DOWNLOAD_FOLDER'] = 'downloads'
 app.secret_key = os.urandom(24)
 
-API_KEY = os.getenv("YOUTUBE_API_KEY", "AIzaSyAKkaccfpCX8rfG03CLfkC9u4y2_ZLeRe4")
+API_KEY = os.getenv("YOUTUBE_API_KEY")
+YTDLP_PROXY_URL = os.getenv("YTDLP_PROXY_URL")
+
+if not API_KEY:
+    print("WARNING: YOUTUBE_API_KEY environment variable is not set. API dependent features may fail.")
 
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
 if not os.path.exists(app.config['DOWNLOAD_FOLDER']):
     os.makedirs(app.config['DOWNLOAD_FOLDER'])
+
+if YTDLP_PROXY_URL:
+    print(f"INFO: Using yt-dlp proxy: {YTDLP_PROXY_URL}")
 
 def get_youtube_service():
     return build('youtube', 'v3', developerKey=API_KEY)
@@ -191,9 +198,10 @@ def fetch_info():
             'skip_download': True,
             'forcejson': True,
             'youtube_skip_dash_manifest': True,
-            # Consider adding a general user-agent to all yt-dlp calls
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
+        if YTDLP_PROXY_URL:
+            base_ydl_opts['proxy'] = YTDLP_PROXY_URL
 
         # Attempt 1: With cookies (if provided)
         if cookies_file_path:
@@ -395,7 +403,7 @@ def download_video():
             'noplaylist': True,
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'noprogress': True,
-            'verbose': False, # Keep verbose off for downloads unless debugging specific download step
+            'verbose': False, 
             'quiet': True,
             'nopart': True,
             'continuedl': False,
@@ -408,6 +416,8 @@ def download_video():
             },
             'youtube_skip_dash_manifest': True,
         }
+        if YTDLP_PROXY_URL:
+            base_ydl_opts['proxy'] = YTDLP_PROXY_URL
 
         # Initial info fetch for filename (always try, but handle failure)
         temp_ydl_opts_for_info = base_ydl_opts.copy()
