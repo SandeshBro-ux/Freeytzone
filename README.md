@@ -1,48 +1,93 @@
-# Freeytzone - YouTube Video Downloader
+# FreeYTZone - YouTube Video Downloader
 
-A web application that allows users to download YouTube videos in various qualities, extract MP3 audio, and download thumbnails or channel logos.
-
-## Recent Enhancements for Cookie Handling
-
-The application has been updated to improve cookie handling, specifically to address issues with YouTube bot detection when deployed on platforms like Render. The key changes include:
-
-### 1. Enhanced Cookie Handling
-- Added a new `create_cookie_file()` function that uses temporary files for better security
-- Improved process_cookie_string() with better detection and formatting of Netscape cookie format
-- Better cleanup of temporary cookie files
-
-### 2. Improved Error Handling for Rate Limits
-- Added specific detection and handling for HTTP 429 (Too Many Requests) errors
-- Clear error messages that guide users to provide cookies when needed
-
-### 3. Browser-like Request Headers
-- Updated HTTP headers to make requests appear more like a standard browser
-- Added Accept, Accept-Language, and other headers that help avoid detection
-
-### 4. Better File Finding Logic
-- Improved logic for finding downloaded files in case of unexpected naming issues
-
-## Usage
-
-To use cookies with the application:
-
-1. Export cookies from a browser extension like "EditThisCookie" or "Cookie-Editor"
-2. Copy the Netscape format cookies into the cookies input field
-3. This helps bypass YouTube's bot detection when fetching video information and downloading videos
-
-## Setup and Running
-
-1. Install dependencies: `pip install -r requirements.txt`
-2. Run the application: `python app.py`
-3. Access the application at `http://localhost:5000`
+A web application for downloading YouTube videos with support for various quality options and automatic IP rotation to bypass rate limits.
 
 ## Features
 
-- Fetch and display YouTube video information
-- Download videos in various qualities (up to 2K)
-- Extract MP3 audio from videos
-- Download video thumbnails and channel logos
-- Support for cookies to handle age-restricted and private videos
+- Clean, modern web interface
+- Support for downloading videos in multiple quality levels (up to 2K/4K)
+- MP3 audio extraction
+- VPNBook proxy integration for bypassing YouTube's rate limits (HTTP Error 429)
+- Proper cookie support for downloading age-restricted or private videos
+- Automatic retry with proxy rotation when encountering rate limits
+
+## Environment Variables
+
+Configure the application with the following environment variables:
+
+- `YOUTUBE_API_KEY` - YouTube Data API key for fetching video metadata
+- `YTDLP_PROXY_URL` - Custom proxy URL (overrides VPNBook if set)
+- `USE_VPNBOOK` - Enable/disable VPNBook proxy integration (default: "True")
+- `VPNBOOK_COUNTRY` - Country for VPNBook proxy (default: random, options: US, CA, DE, FR, UK, PL)
+- `VPNBOOK_PROTOCOL` - Protocol for VPNBook proxy (default: "http", options: "http", "socks")
+
+## Installation
+
+### Requirements
+- Python 3.8 or higher
+- FFmpeg (for video format conversion and audio extraction)
+
+### Setup
+
+1. Clone the repository:
+```bash
+git clone https://github.com/SandeshBro-ux/Freeytzone.git
+cd Freeytzone
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Create a `.env` file with your YouTube API key:
+```
+YOUTUBE_API_KEY=your_youtube_api_key
+USE_VPNBOOK=True
+```
+
+4. Run the application:
+```bash
+python app.py
+```
+
+## Deployment on Render
+
+This application is configured for easy deployment on Render.
+
+1. Create a new Web Service on Render
+2. Connect your GitHub repository
+3. Configure environment variables in the Render dashboard
+4. Deploy!
+
+## VPNBook Proxy Integration
+
+The application integrates with VPNBook's free proxies to bypass YouTube's rate limits:
+
+- Automatically fetches the current VPNBook password
+- Rotates proxies when encountering rate limits
+- Tracks failed proxies to avoid using them again
+- Supports multiple countries (US, Canada, Germany, France, UK, Poland)
+
+## Usage
+
+1. Enter a YouTube video URL
+2. (Optional) Paste your YouTube cookies for age-restricted or private videos
+3. Click "Fetch Video Info" to analyze the video
+4. Select your desired quality
+5. Click "Download" to save the video
+
+## Handling Rate Limits
+
+YouTube imposes rate limits (HTTP 429 errors) on frequent requests. This application:
+
+1. Automatically retries with different VPNBook proxies
+2. Provides clear error messages when rate limits are encountered
+3. Allows using cookies to authenticate with YouTube and reduce rate limiting
+
+## License
+
+MIT License
 
 ## Project Structure
 

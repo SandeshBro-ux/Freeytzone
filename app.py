@@ -13,6 +13,9 @@ from PIL import Image, ImageDraw
 import urllib.request
 import traceback
 
+# Import our VPNBook proxy manager
+from vpn_handler import get_ytdlp_proxy_url, mark_proxy_failed
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -21,7 +24,13 @@ app.config['DOWNLOAD_FOLDER'] = 'downloads'
 app.secret_key = os.urandom(24)
 
 API_KEY = os.getenv("YOUTUBE_API_KEY")
+
+# Get the proxy URL from environment variable or use VPNBook
 YTDLP_PROXY_URL = os.getenv("YTDLP_PROXY_URL")
+# VPNBook settings
+USE_VPNBOOK = os.getenv("USE_VPNBOOK", "True").lower() == "true"
+VPNBOOK_COUNTRY = os.getenv("VPNBOOK_COUNTRY", None)  # None for random country
+VPNBOOK_PROTOCOL = os.getenv("VPNBOOK_PROTOCOL", "http")  # http or socks
 
 if not API_KEY:
     print("WARNING: YOUTUBE_API_KEY environment variable is not set. API dependent features may fail.")
@@ -32,7 +41,17 @@ if not os.path.exists(app.config['DOWNLOAD_FOLDER']):
     os.makedirs(app.config['DOWNLOAD_FOLDER'])
 
 if YTDLP_PROXY_URL:
-    print(f"INFO: Using yt-dlp proxy: {YTDLP_PROXY_URL}")
+    print(f"INFO: Using configured yt-dlp proxy: {YTDLP_PROXY_URL}")
+elif USE_VPNBOOK:
+    try:
+        vpnbook_proxy = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL)
+        if vpnbook_proxy:
+            YTDLP_PROXY_URL = vpnbook_proxy
+            print(f"INFO: Using VPNBook proxy: {YTDLP_PROXY_URL.split('@')[1] if '@' in YTDLP_PROXY_URL else YTDLP_PROXY_URL}")
+        else:
+            print("WARNING: Failed to get VPNBook proxy URL. Continuing without proxy.")
+    except Exception as e:
+        print(f"ERROR: Failed to initialize VPNBook proxy: {e}")
 
 def get_youtube_service():
     return build('youtube', 'v3', developerKey=API_KEY)
@@ -201,9 +220,18 @@ def fetch_info():
             # Default User-Agent
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
+        
+        # Add proxy if available
+        current_proxy_url = YTDLP_PROXY_URL
+        if not current_proxy_url and USE_VPNBOOK:
+            # Try to get a fresh VPNBook proxy URL
+            try:
+                current_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL)
+            except Exception as e:
+                print(f"Error getting VPNBook proxy URL: {e}")
 
-        if YTDLP_PROXY_URL:
-            base_ydl_opts['proxy'] = YTDLP_PROXY_URL
+        if current_proxy_url:
+            base_ydl_opts['proxy'] = current_proxy_url
 
         # Attempt 1: With cookies (if provided)
         if cookies_file_path:
@@ -218,6 +246,24 @@ def fetch_info():
                 print(f"yt-dlp DownloadError WITH cookies: {error_str}")
                 if "http error 429" in error_str or "too many requests" in error_str:
                     encountered_429 = True
+                    if USE_VPNBOOK:
+                        # Mark current proxy as failed and try to get a new one
+                        mark_proxy_failed()
+                        try:
+                            new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
+                            if new_proxy_url:
+                                print(f"Rotated VPNBook proxy after 429 error to: {new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
+                                ydl_opts_with_cookies['proxy'] = new_proxy_url
+                                # Try again with the new proxy
+                                try:
+                                    with yt_dlp.YoutubeDL(ydl_opts_with_cookies) as ydl:
+                                        info_dict = ydl.extract_info(url, download=False)
+                                    # If we get here, the new proxy worked!
+                                    encountered_429 = False
+                                except yt_dlp.utils.DownloadError as retry_err:
+                                    print(f"Retry with new proxy also failed: {str(retry_err)}")
+                        except Exception as e:
+                            print(f"Error rotating VPNBook proxy: {e}")
                 info_dict = None 
             except Exception as e_generic:
                 print(f"Generic yt-dlp error WITH cookies: {e_generic}")
@@ -236,6 +282,24 @@ def fetch_info():
                 print(f"yt-dlp DownloadError WITHOUT cookies: {error_str}")
                 if "http error 429" in error_str or "too many requests" in error_str:
                     encountered_429 = True
+                    if USE_VPNBOOK:
+                        # Mark current proxy as failed and try to get a new one
+                        mark_proxy_failed()
+                        try:
+                            new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
+                            if new_proxy_url:
+                                print(f"Rotated VPNBook proxy after 429 error to: {new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
+                                ydl_opts_no_cookies['proxy'] = new_proxy_url
+                                # Try again with the new proxy
+                                try:
+                                    with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
+                                        info_dict = ydl.extract_info(url, download=False)
+                                    # If we get here, the new proxy worked!
+                                    encountered_429 = False
+                                except yt_dlp.utils.DownloadError as retry_err:
+                                    print(f"Retry with new proxy also failed: {str(retry_err)}")
+                        except Exception as e:
+                            print(f"Error rotating VPNBook proxy: {e}")
                 # If this fails, this is our final yt-dlp error for info
                 # The jsonify below will handle the encountered_429 flag
             except Exception as e_generic_no_cookies:
@@ -421,8 +485,18 @@ def download_video():
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
 
-        if YTDLP_PROXY_URL:
-            base_ydl_opts['proxy'] = YTDLP_PROXY_URL
+        # Add proxy if available
+        current_proxy_url = YTDLP_PROXY_URL
+        if not current_proxy_url and USE_VPNBOOK:
+            # Try to get a fresh VPNBook proxy URL
+            try:
+                current_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL)
+            except Exception as e:
+                print(f"Error getting VPNBook proxy URL: {e}")
+
+        if current_proxy_url:
+            base_ydl_opts['proxy'] = current_proxy_url
+            print(f"Using proxy for download: {current_proxy_url.split('@')[1] if '@' in current_proxy_url else current_proxy_url}")
 
         # Initial info fetch for filename (always try, but handle failure)
         temp_ydl_opts_for_info = base_ydl_opts.copy()
@@ -442,12 +516,41 @@ def download_video():
             error_str = str(e_info_dl_err).lower()
             print(f"DownloadError during initial info fetch for filename: {error_str}")
             if "http error 429" in error_str or "too many requests" in error_str:
-                if cookies_file_path and os.path.exists(cookies_file_path):
-                    try: os.remove(cookies_file_path)
-                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
-                return jsonify({
-                    'error': 'YouTube is rate-limiting requests. Cannot fetch video title for download. Please use cookies or try again later.'
-                }), 429
+                if USE_VPNBOOK:
+                    # Mark current proxy as failed and try to get a new one
+                    mark_proxy_failed()
+                    try:
+                        new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
+                        if new_proxy_url:
+                            print(f"Rotated VPNBook proxy after 429 error to: {new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
+                            temp_ydl_opts_for_info['proxy'] = new_proxy_url
+                            # Try again with the new proxy
+                            try:
+                                with yt_dlp.YoutubeDL(temp_ydl_opts_for_info) as ydl:
+                                    info_dict_for_filename = ydl.extract_info(url, download=False)
+                            except yt_dlp.utils.DownloadError as retry_err:
+                                print(f"Retry with new proxy also failed: {str(retry_err)}")
+                                if cookies_file_path and os.path.exists(cookies_file_path):
+                                    try: os.remove(cookies_file_path)
+                                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                                return jsonify({
+                                    'error': 'YouTube is rate-limiting requests even after changing proxy. Please try again later.'
+                                }), 429
+                    except Exception as e:
+                        print(f"Error rotating VPNBook proxy: {e}")
+                        if cookies_file_path and os.path.exists(cookies_file_path):
+                            try: os.remove(cookies_file_path)
+                            except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                        return jsonify({
+                            'error': 'YouTube is rate-limiting requests. Cannot fetch video title for download. Please use cookies or try again later.'
+                        }), 429
+                else:
+                    if cookies_file_path and os.path.exists(cookies_file_path):
+                        try: os.remove(cookies_file_path)
+                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                    return jsonify({
+                        'error': 'YouTube is rate-limiting requests. Cannot fetch video title for download. Please use cookies or try again later.'
+                    }), 429
             # For other errors, we might proceed with a default filename, so don't return error yet.
             # info_dict_for_filename will remain empty {} as initialized.
         except Exception as e_generic_info:
@@ -491,10 +594,35 @@ def download_video():
                 error_str = str(e_mp3_dl).lower()
                 print(f"DownloadError during MP3 download: {error_str}")
                 if "http error 429" in error_str or "too many requests" in error_str:
-                    if cookies_file_path and os.path.exists(cookies_file_path):
-                        try: os.remove(cookies_file_path)
-                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
-                    return jsonify({'error': 'YouTube is rate-limiting downloads. Please try again later or use cookies.'}), 429
+                    if USE_VPNBOOK:
+                        # Mark current proxy as failed and try to get a new one
+                        mark_proxy_failed()
+                        try:
+                            new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
+                            if new_proxy_url:
+                                print(f"Rotated VPNBook proxy after 429 error to: {new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
+                                mp3_ydl_opts['proxy'] = new_proxy_url
+                                # Try again with the new proxy
+                                try:
+                                    with yt_dlp.YoutubeDL(mp3_ydl_opts) as ydl:
+                                        download_info_dict = ydl.extract_info(url, download=True)
+                                except yt_dlp.utils.DownloadError as retry_err:
+                                    print(f"Retry with new proxy also failed: {str(retry_err)}")
+                                    if cookies_file_path and os.path.exists(cookies_file_path):
+                                        try: os.remove(cookies_file_path)
+                                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                                    return jsonify({'error': 'YouTube is rate-limiting downloads even after changing proxy. Please try again later.'}), 429
+                        except Exception as e:
+                            print(f"Error rotating VPNBook proxy: {e}")
+                            if cookies_file_path and os.path.exists(cookies_file_path):
+                                try: os.remove(cookies_file_path)
+                                except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                            return jsonify({'error': 'YouTube is rate-limiting downloads. Please try again later or use cookies.'}), 429
+                    else:
+                        if cookies_file_path and os.path.exists(cookies_file_path):
+                            try: os.remove(cookies_file_path)
+                            except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                        return jsonify({'error': 'YouTube is rate-limiting downloads. Please try again later or use cookies.'}), 429
                 if cookies_file_path and os.path.exists(cookies_file_path):
                     try: os.remove(cookies_file_path)
                     except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
@@ -563,10 +691,35 @@ def download_video():
             error_str = str(e_video_dl).lower()
             print(f"DownloadError during video download ({quality}): {error_str}")
             if "http error 429" in error_str or "too many requests" in error_str:
-                if cookies_file_path and os.path.exists(cookies_file_path):
-                    try: os.remove(cookies_file_path)
-                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
-                return jsonify({'error': 'YouTube is rate-limiting video downloads. Please try again later or use cookies.'}), 429
+                if USE_VPNBOOK:
+                    # Mark current proxy as failed and try to get a new one
+                    mark_proxy_failed()
+                    try:
+                        new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
+                        if new_proxy_url:
+                            print(f"Rotated VPNBook proxy after 429 error to: {new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
+                            base_ydl_opts['proxy'] = new_proxy_url
+                            # Try again with the new proxy
+                            try:
+                                with yt_dlp.YoutubeDL(base_ydl_opts) as ydl:
+                                    downloaded_video_info = ydl.extract_info(url, download=True)
+                            except yt_dlp.utils.DownloadError as retry_err:
+                                print(f"Retry with new proxy also failed: {str(retry_err)}")
+                                if cookies_file_path and os.path.exists(cookies_file_path):
+                                    try: os.remove(cookies_file_path)
+                                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                                return jsonify({'error': 'YouTube is rate-limiting video downloads even after changing proxy. Please try again later.'}), 429
+                    except Exception as e:
+                        print(f"Error rotating VPNBook proxy: {e}")
+                        if cookies_file_path and os.path.exists(cookies_file_path):
+                            try: os.remove(cookies_file_path)
+                            except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                        return jsonify({'error': 'YouTube is rate-limiting video downloads. Please try again later or use cookies.'}), 429
+                else:
+                    if cookies_file_path and os.path.exists(cookies_file_path):
+                        try: os.remove(cookies_file_path)
+                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                    return jsonify({'error': 'YouTube is rate-limiting video downloads. Please try again later or use cookies.'}), 429
             if cookies_file_path and os.path.exists(cookies_file_path):
                 try: os.remove(cookies_file_path)
                 except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
