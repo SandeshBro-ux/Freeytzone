@@ -177,44 +177,81 @@ def fetch_info():
         return jsonify({'error': 'Invalid YouTube URL'}), 400
 
     cookies_file_path = None
+    info_dict = None # Initialize info_dict
+
     try:
         cookies_file_path = create_cookie_file(cookies_content, f"fetch_{video_id}")
         
         ydl_opts = {
             'cookiefile': cookies_file_path,
             'noplaylist': True,
-            'quiet': True,
-            'no_warnings': False,  # Show warnings to help diagnose issues
-            'skip_download': True  # We're just fetching info
+            'quiet': False, # Let's get more verbose output for a bit for debugging on Render
+            'no_warnings': False,
+            'skip_download': True,
+            'forcejson': True, # Try to force JSON output
+            'youtube_skip_dash_manifest': True, # May help with some 429s
+            # 'source_address': '0.0.0.0', # This is for binding, not useful for outgoing IP on Render
         }
         
-        info_dict = None
-        try:
-            # Attempt with provided cookies first
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info_dict = ydl.extract_info(url, download=False)
-        except Exception as err:
-            print(f"yt-dlp error with cookies: {err}")
-            if "429" in str(err) or "too many requests" in str(err).lower():
-                return jsonify({'error': 'YouTube rate limit reached. Please try again later or provide valid cookies.'}), 429
-            
-            # Retry without cookies if initial attempt fails
-            print(f"Retrying without cookies...")
-            fallback_opts = dict(ydl_opts)
-            fallback_opts['cookiefile'] = None
-            with yt_dlp.YoutubeDL(fallback_opts) as ydl2:
-                try:
+        # Attempt 1: With cookies (if provided)
+        if cookies_file_path:
+            print(f"Attempting to fetch info for {url} WITH cookies: {cookies_file_path}")
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info_dict = ydl.extract_info(url, download=False)
+            except yt_dlp.utils.DownloadError as err:
+                error_str = str(err).lower()
+                print(f"yt-dlp DownloadError WITH cookies: {error_str}")
+                if "http error 429" in error_str or "too many requests" in error_str:
+                    # If rate-limited with cookies, it's a persistent issue. Advise user.
+                    # Clean up cookie file before returning early
+                    if cookies_file_path and os.path.exists(cookies_file_path):
+                        try: os.remove(cookies_file_path)
+                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                    return jsonify({'error': 'YouTube is rate-limiting requests from this server, even with cookies. Please try again later.'}), 429
+                # For other errors with cookies, we might still try without, or propagate error
+                info_dict = None # Ensure info_dict is None to trigger next step if applicable
+            except Exception as e_generic:
+                print(f"Generic yt-dlp error WITH cookies: {e_generic}")
+                info_dict = None
+
+        # Attempt 2: Without cookies (if no cookies provided OR first attempt failed for a non-429 reason and info_dict is still None)
+        if not info_dict: 
+            print(f"Attempting to fetch info for {url} WITHOUT cookies.")
+            ydl_opts_no_cookies = ydl_opts.copy()
+            ydl_opts_no_cookies['cookiefile'] = None
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl2:
                     info_dict = ydl2.extract_info(url, download=False)
-                except Exception as fallback_err:
-                    error_msg = str(fallback_err)
-                    if "429" in error_msg or "too many requests" in error_msg.lower():
-                        return jsonify({'error': 'YouTube rate limit reached. Please try with valid cookies.'}), 429
-                    else:
-                        return jsonify({'error': f'Failed to fetch video info: {error_msg}'}), 500
+            except yt_dlp.utils.DownloadError as err_no_cookies:
+                error_str = str(err_no_cookies).lower()
+                print(f"yt-dlp DownloadError WITHOUT cookies: {error_str}")
+                if "http error 429" in error_str or "too many requests" in error_str:
+                    # Clean up cookie file before returning early
+                    if cookies_file_path and os.path.exists(cookies_file_path):
+                        try: os.remove(cookies_file_path)
+                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                    return jsonify({'error': 'YouTube is rate-limiting requests from this server. Please provide cookies or try again later.'}), 429
+                # For other errors, this is our last yt-dlp attempt for info
+                if cookies_file_path and os.path.exists(cookies_file_path):
+                    try: os.remove(cookies_file_path)
+                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                return jsonify({'error': f'Failed to fetch video info after multiple attempts: {error_str}'}), 500
+            except Exception as e_generic_no_cookies:
+                print(f"Generic yt-dlp error WITHOUT cookies: {e_generic_no_cookies}")
+                if cookies_file_path and os.path.exists(cookies_file_path):
+                    try: os.remove(cookies_file_path)
+                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                return jsonify({'error': f'A server error occurred: {e_generic_no_cookies}'}), 500
             
         if not info_dict:
-            return jsonify({'error': 'Could not fetch video information'}), 500
+            # This should ideally be caught by the error handling above, but as a safeguard:
+            if cookies_file_path and os.path.exists(cookies_file_path):
+                try: os.remove(cookies_file_path)
+                except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+            return jsonify({'error': 'Could not fetch video information from yt-dlp.'}), 500
             
+        # --- Proceed with processing info_dict --- 
         formats = info_dict.get('formats', [])
         
         ydl_max_height = 0  # Renamed from actual_max_height
@@ -240,9 +277,12 @@ def fetch_info():
         print(f"Max height identified by yt-dlp: {ydl_max_height}p")
         
         # Manual fallback: parse the YouTube watch page HTML to get streamingData for all formats
+        # THIS HTML PARSING IS VERY LIKELY TO BE BLOCKED IF YT-DLP IS BLOCKED BY 429
+        # Consider removing or heavily conditionalizing this if 429s are persistent
+        # For now, let's keep it but be aware.
         try:
             session = requests.Session()
-            if cookies_file_path:
+            if cookies_file_path and os.path.exists(cookies_file_path): # check existence again, might have been cleaned
                 jar = MozillaCookieJar()
                 jar.load(cookies_file_path, ignore_discard=True, ignore_expires=True)
                 session.cookies = jar
@@ -337,9 +377,9 @@ def fetch_info():
         if cookies_file_path and os.path.exists(cookies_file_path):
             try:
                 os.remove(cookies_file_path)
-                print(f"Cleaned up cookie file: {cookies_file_path}")
+                print(f"Cleaned up cookie file in finally: {cookies_file_path}")
             except Exception as e:
-                print(f"Failed to clean up cookie file: {e}")
+                print(f"Failed to clean up cookie file in finally: {e}")
 
 @app.route('/download', methods=['POST'])
 def download_video():
@@ -353,57 +393,70 @@ def download_video():
 
     video_id = extract_video_id(url) or "unknown"
     cookies_file_path = None
+    info_dict_for_filename = {} # For storing info used for filename generation
     
     try:
         cookies_file_path = create_cookie_file(cookies_content, f"dl_{video_id}")
         download_path = app.config['DOWNLOAD_FOLDER']
         
-        # Common yt-dlp options
         base_ydl_opts = {
             'cookiefile': cookies_file_path,
             'noplaylist': True,
-            'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'), # Default, will be refined
+            'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'noprogress': True,
-            'verbose': True, 
-            'nopart': True,          
-            'continuedl': False,  
-            # Add headers to mimic a browser better
+            'verbose': False, # Keep verbose off for downloads unless debugging specific download step
+            'quiet': True,
+            'nopart': True,
+            'continuedl': False,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'DNT': '1',
                 'Connection': 'keep-alive',
-            }   
+            },
+            'youtube_skip_dash_manifest': True,
         }
 
-        # First, fetch info_dict to get title for filename sanitization
+        # Initial info fetch for filename (always try, but handle failure)
         temp_ydl_opts_for_info = base_ydl_opts.copy()
         temp_ydl_opts_for_info.pop('format', None)
-        temp_ydl_opts_for_info.pop('postprocessors', None) 
-        temp_ydl_opts_for_info.pop('postprocessor_args', None) 
+        temp_ydl_opts_for_info.pop('postprocessors', None)
+        temp_ydl_opts_for_info.pop('postprocessor_args', None)
         temp_ydl_opts_for_info['outtmpl'] = os.path.join(download_path, '%(id)s_temp_info.%(ext)s')
-        temp_ydl_opts_for_info['quiet'] = True
         temp_ydl_opts_for_info['skip_download'] = True
+        temp_ydl_opts_for_info['quiet'] = False # Let's see output for this specific step
+        temp_ydl_opts_for_info['forcejson'] = True
 
-        info_dict = {} # Initialize as an empty dictionary
+        print("Attempting initial info fetch for filename (download route)...")
         try:
             with yt_dlp.YoutubeDL(temp_ydl_opts_for_info) as ydl_info_fetch:
-                info_dict = ydl_info_fetch.extract_info(url, download=False) 
-        except Exception as e:
-            print(f"Error fetching info_dict: {e}")
-            # Handle rate limit errors
-            if "429" in str(e) or "too many requests" in str(e).lower():
-                return jsonify({'error': 'YouTube rate limit reached. Please try again later with valid cookies.'}), 429
-            # Continue with empty info_dict for fallback filename generation
+                info_dict_for_filename = ydl_info_fetch.extract_info(url, download=False)
+        except yt_dlp.utils.DownloadError as e_info_dl_err:
+            error_str = str(e_info_dl_err).lower()
+            print(f"DownloadError during initial info fetch for filename: {error_str}")
+            if "http error 429" in error_str or "too many requests" in error_str:
+                if cookies_file_path and os.path.exists(cookies_file_path):
+                    try: os.remove(cookies_file_path)
+                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                return jsonify({
+                    'error': 'YouTube is rate-limiting requests. Cannot fetch video title for download. Please use cookies or try again later.'
+                }), 429
+            # For other errors, we might proceed with a default filename, so don't return error yet.
+            # info_dict_for_filename will remain empty {} as initialized.
+        except Exception as e_generic_info:
+            print(f"Generic error during initial info fetch for filename: {e_generic_info}")
+            # info_dict_for_filename will remain empty {}.
 
-        # Set output template based on info_dict
-        if info_dict.get('title'):
-            final_filename_stem = sanitize_filename(info_dict.get('title', 'video'))
+        if info_dict_for_filename.get('title'):
+            final_filename_stem = sanitize_filename(info_dict_for_filename.get('title', 'video'))
             base_ydl_opts['outtmpl'] = os.path.join(download_path, f'{final_filename_stem}.%(ext)s')
         else:
-            # Fallback to ID-based filename
             base_ydl_opts['outtmpl'] = os.path.join(download_path, f'{video_id}_%(height)sp.%(ext)s')
+
+        # --- Actual download process starts here ---
+        # Add 'format' and other download-specific options back to base_ydl_opts
+        # (This part of your existing logic seems okay, but it will also be subject to 429s)
 
         if quality == 'mp3':
             format_selector = 'bestaudio/best'
@@ -425,34 +478,47 @@ def download_video():
                 'ffmpeg_location': os.getenv('FFMPEG_PATH')
             })
 
-            with yt_dlp.YoutubeDL(mp3_ydl_opts) as ydl:
-                download_info_dict = ydl.extract_info(url, download=True)
-                
-                temp_audio_id = download_info_dict.get('id', 'temp_audio')
-                temp_audio_base = os.path.join(download_path, f"{temp_audio_id}_temp_audio.mp3")
+            try:
+                with yt_dlp.YoutubeDL(mp3_ydl_opts) as ydl:
+                    download_info_dict = ydl.extract_info(url, download=True)
+            except yt_dlp.utils.DownloadError as e_mp3_dl:
+                error_str = str(e_mp3_dl).lower()
+                print(f"DownloadError during MP3 download: {error_str}")
+                if "http error 429" in error_str or "too many requests" in error_str:
+                    if cookies_file_path and os.path.exists(cookies_file_path):
+                        try: os.remove(cookies_file_path)
+                        except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                    return jsonify({'error': 'YouTube is rate-limiting downloads. Please try again later or use cookies.'}), 429
+                if cookies_file_path and os.path.exists(cookies_file_path):
+                    try: os.remove(cookies_file_path)
+                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                return jsonify({'error': f'Failed to download MP3: {error_str}'}), 500
 
-                if os.path.exists(final_mp3_path_on_server):
-                    os.remove(final_mp3_path_on_server)
-                
-                if os.path.exists(temp_audio_base):
-                    os.rename(temp_audio_base, final_mp3_path_on_server)
-                else:
-                    print(f"MP3 file not found at expected path: {temp_audio_base}")
-                    # Search for any MP3 file with the temp ID in the name
-                    mp3_files = [f for f in os.listdir(download_path) if temp_audio_id in f and f.endswith('.mp3')]
-                    if mp3_files:
-                        print(f"Found alternative MP3 file: {mp3_files[0]}")
-                        os.rename(os.path.join(download_path, mp3_files[0]), final_mp3_path_on_server)
-                    else:
-                        return jsonify({'error': 'MP3 conversion failed. Output file not found.'}), 500
+            temp_audio_id = download_info_dict.get('id', 'temp_audio')
+            temp_audio_base = os.path.join(download_path, f"{temp_audio_id}_temp_audio.mp3")
 
-                if os.path.exists(final_mp3_path_on_server):
-                    return jsonify({
-                        'download_url': f'/downloads/{fixed_mp3_filename}',
-                        'filename': fixed_mp3_filename
-                    })
+            if os.path.exists(final_mp3_path_on_server):
+                os.remove(final_mp3_path_on_server)
+            
+            if os.path.exists(temp_audio_base):
+                os.rename(temp_audio_base, final_mp3_path_on_server)
+            else:
+                print(f"MP3 file not found at expected path: {temp_audio_base}")
+                # Search for any MP3 file with the temp ID in the name
+                mp3_files = [f for f in os.listdir(download_path) if temp_audio_id in f and f.endswith('.mp3')]
+                if mp3_files:
+                    print(f"Found alternative MP3 file: {mp3_files[0]}")
+                    os.rename(os.path.join(download_path, mp3_files[0]), final_mp3_path_on_server)
                 else:
-                    return jsonify({'error': 'MP3 finalization failed.'}), 500
+                    return jsonify({'error': 'MP3 conversion failed. Output file not found.'}), 500
+
+            if os.path.exists(final_mp3_path_on_server):
+                return jsonify({
+                    'download_url': f'/downloads/{fixed_mp3_filename}',
+                    'filename': fixed_mp3_filename
+                })
+            else:
+                return jsonify({'error': 'MP3 finalization failed.'}), 500
 
         elif quality == '2K':
             format_selector = 'bestvideo[height<=?2160]+bestaudio/best[height<=?2160]'
@@ -484,44 +550,57 @@ def download_video():
         })
 
         print(f"Final ydl_opts for video quality {quality}: {base_ydl_opts}")
-        with yt_dlp.YoutubeDL(base_ydl_opts) as ydl:
-            downloaded_video_info = ydl.extract_info(url, download=True) 
-            
-            list_of_files = os.listdir(download_path)
-            info_for_filename_check = info_dict if info_dict.get('title') else downloaded_video_info
-            expected_title_stem = sanitize_filename(info_for_filename_check.get('title', 'video'))
-            
-            if not info_dict.get('title'):
-                height_str = str(downloaded_video_info.get('height', '')) + "p" if downloaded_video_info.get('height') else "res"
-                expected_title_stem = sanitize_filename(video_id + "_" + height_str)
+        try:
+            with yt_dlp.YoutubeDL(base_ydl_opts) as ydl:
+                downloaded_video_info = ydl.extract_info(url, download=True)
+        except yt_dlp.utils.DownloadError as e_video_dl:
+            error_str = str(e_video_dl).lower()
+            print(f"DownloadError during video download ({quality}): {error_str}")
+            if "http error 429" in error_str or "too many requests" in error_str:
+                if cookies_file_path and os.path.exists(cookies_file_path):
+                    try: os.remove(cookies_file_path)
+                    except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+                return jsonify({'error': 'YouTube is rate-limiting video downloads. Please try again later or use cookies.'}), 429
+            if cookies_file_path and os.path.exists(cookies_file_path):
+                try: os.remove(cookies_file_path)
+                except Exception as e_rm: print(f"Error removing cookie file early: {e_rm}")
+            return jsonify({'error': f'Failed to download video ({quality}): {error_str}'}), 500
 
-            downloaded_filename = None
-            possible_exts = [info_for_filename_check.get('ext')] 
-            if quality == '1080p' or quality == '720p' or quality == '2K': possible_exts.append('mp4')
-            if quality == 'mp3': possible_exts.append('mp3')
-            possible_exts = list(set(filter(None, possible_exts)))
+        list_of_files = os.listdir(download_path)
+        info_for_filename_check = info_dict_for_filename if info_dict_for_filename.get('title') else downloaded_video_info
+        expected_title_stem = sanitize_filename(info_for_filename_check.get('title', 'video'))
+        
+        if not info_dict_for_filename.get('title'):
+            height_str = str(downloaded_video_info.get('height', '')) + "p" if downloaded_video_info.get('height') else "res"
+            expected_title_stem = sanitize_filename(video_id + "_" + height_str)
 
-            for f_name in sorted(list_of_files, key=lambda x: os.path.getmtime(os.path.join(download_path, x)), reverse=True):
-                if f_name.startswith(expected_title_stem):
-                    file_ext_lower = f_name.split('.')[-1].lower() if '.' in f_name else ''
-                    for p_ext in possible_exts:
-                        if file_ext_lower == p_ext.lower():
-                             downloaded_filename = f_name
-                             break
-                    if downloaded_filename:
-                        break
-            
-            if not downloaded_filename:
-                if list_of_files:
-                    latest_file = max([os.path.join(download_path, f) for f in list_of_files if f.lower().endswith(tuple(possible_exts) + ('.mkv', '.webm'))], 
-                                       key=os.path.getctime, default=None)
-                    if latest_file:
-                        downloaded_filename = os.path.basename(latest_file)
-                        print(f"Fallback: Guessed downloaded filename as: {downloaded_filename}")
+        downloaded_filename = None
+        possible_exts = [info_for_filename_check.get('ext')] 
+        if quality == '1080p' or quality == '720p' or quality == '2K': possible_exts.append('mp4')
+        if quality == 'mp3': possible_exts.append('mp3')
+        possible_exts = list(set(filter(None, possible_exts)))
 
-            if not downloaded_filename:
-                 print(f"Could not determine downloaded filename for title: {expected_title_stem} and exts: {possible_exts}")
-                 return jsonify({'error': 'Could not determine downloaded filename after download.'}), 500
+        for f_name in sorted(list_of_files, key=lambda x: os.path.getmtime(os.path.join(download_path, x)), reverse=True):
+            if f_name.startswith(expected_title_stem):
+                file_ext_lower = f_name.split('.')[-1].lower() if '.' in f_name else ''
+                for p_ext in possible_exts:
+                    if file_ext_lower == p_ext.lower():
+                         downloaded_filename = f_name
+                         break
+                if downloaded_filename:
+                    break
+        
+        if not downloaded_filename:
+            if list_of_files:
+                latest_file = max([os.path.join(download_path, f) for f in list_of_files if f.lower().endswith(tuple(possible_exts) + ('.mkv', '.webm'))], 
+                                   key=os.path.getctime, default=None)
+                if latest_file:
+                    downloaded_filename = os.path.basename(latest_file)
+                    print(f"Fallback: Guessed downloaded filename as: {downloaded_filename}")
+
+        if not downloaded_filename:
+             print(f"Could not determine downloaded filename for title: {expected_title_stem} and exts: {possible_exts}")
+             return jsonify({'error': 'Could not determine downloaded filename after download.'}), 500
 
         download_url = f'/downloads/{downloaded_filename}'
         return jsonify({
@@ -530,28 +609,24 @@ def download_video():
             'download_url': download_url
         })
     except yt_dlp.utils.DownloadError as e:
-        error_message = str(e)
-        print(f"Download error: {error_message}")
+        error_message = str(e).lower()
+        print(f"Outer DownloadError catch in /download: {error_message}")
+        if "http error 429" in error_message or "too many requests" in error_message:
+            return jsonify({'error': 'YouTube is rate-limiting requests. Please use cookies or try again later.'}), 429
         if "is age restricted" in error_message:
             return jsonify({'error': 'This video is age-restricted and requires cookies to download.'}), 403
         if "Private video" in error_message:
             return jsonify({'error': 'This is a private video. Cookies might be required if you have access.'}), 403
         if "Video unavailable" in error_message:
             return jsonify({'error': 'This video is unavailable.'}), 404
-        if "429" in error_message or "too many requests" in error_message.lower():
-            return jsonify({'error': 'YouTube rate limit reached. Please try again later using valid cookies.'}), 429
         return jsonify({'error': f'Download failed: {error_message}'}), 500
-    except Exception as e:
-        print(f"An unexpected error occurred during download: {e}")
-        traceback.print_exc()
-        return jsonify({'error': f'An unexpected server error occurred: {str(e)}'}), 500
     finally:
         if cookies_file_path and os.path.exists(cookies_file_path):
             try:
                 os.remove(cookies_file_path)
-                print(f"Cleaned up temporary cookie file: {cookies_file_path}")
+                print(f"Cleaned up temporary cookie file in finally /download: {cookies_file_path}")
             except Exception as e:
-                print(f"Error cleaning up cookie file {cookies_file_path}: {e}")
+                print(f"Error cleaning up cookie file in finally /download {cookies_file_path}: {e}")
 
 @app.route('/downloads/<filename>')
 def serve_downloaded_file(filename):
