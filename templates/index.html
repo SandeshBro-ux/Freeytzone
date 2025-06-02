@@ -382,8 +382,15 @@
 
             <div>
                 <label for="cookiesContent" class="form-label">Cookies (Netscape format, optional but recommended):</label>
-                <textarea id="cookiesContent" rows="4" class="w-full" placeholder="# Netscape HTTP Cookie File..."></textarea>
-                <p class="text-xs text-gray-500 mt-1">Required for age-restricted or private videos. Export from browser using an extension like 'EditThisCookie' or 'Cookie-Editor'.</p>
+                <textarea id="cookiesContent" name="cookies_content" rows="5" class="w-full p-2.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-200 placeholder-gray-400 focus:ring-blue-500 focus:border-blue-500 text-sm shadow-sm resize-y" placeholder="Paste your YouTube cookies here in Netscape format..."></textarea>
+                <p class="mt-1 text-xs text-gray-400">Required for age-restricted or private videos. Export from browser using an extension like 'EditThisCookie' or 'Cookie-Editor'.</p>
+            </div>
+
+            <!-- User-Agent Input -->
+            <div class="mb-6">
+                <label for="userAgentInput" class="block mb-2 text-sm font-medium text-gray-300">Browser User-Agent (Optional, but recommended if using cookies):</label>
+                <textarea id="userAgentInput" name="user_agent_content" rows="2" class="w-full p-2.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-200 placeholder-gray-400 focus:ring-blue-500 focus:border-blue-500 text-sm shadow-sm resize-y" placeholder="Paste your browser's User-Agent string here (e.g., Mozilla/5.0 ...)"></textarea>
+                <p class="mt-1 text-xs text-gray-400">Find by searching "my user agent" in your browser. Helps make requests look like they came from your browser when using cookies.</p>
             </div>
 
             <button id="fetchInfoBtn" class="btn btn-primary w-full">
@@ -479,6 +486,7 @@
         const downloadBtn = document.getElementById('downloadBtn');
         const youtubeUrlInput = document.getElementById('youtubeUrl');
         const cookiesContentInput = document.getElementById('cookiesContent');
+        const userAgentInput = document.getElementById('userAgentInput');
         const videoInfoDiv = document.getElementById('videoInfo');
         const loadingSpinner = document.getElementById('loadingSpinner');
         const errorMessageDiv = document.getElementById('errorMessage');
@@ -590,6 +598,7 @@
         fetchInfoBtn.addEventListener('click', async () => {
             currentUrl = youtubeUrlInput.value.trim();
             const cookies = cookiesContentInput.value.trim();
+            const userAgent = userAgentInput.value.trim();
 
             if (!currentUrl) {
                 displayError('Please enter a YouTube URL.');
@@ -614,7 +623,7 @@
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({ url: currentUrl, cookies_content: cookies }),
+                        body: JSON.stringify({ url: currentUrl, cookies_content: cookies, user_agent: userAgent }),
                     },
                     MAX_RETRIES,
                     RETRY_DELAY_MS,
@@ -708,6 +717,7 @@
         downloadBtn.addEventListener('click', async () => {
             const selectedQuality = qualitySelect.value;
             const cookies = cookiesContentInput.value.trim();
+            const userAgent = userAgentInput.value.trim();
 
             if (!currentUrl) {
                 displayError('No URL specified. Please fetch info first.');
@@ -754,7 +764,7 @@
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({ url: currentUrl, quality: selectedQuality, cookies_content: cookies }),
+                        body: JSON.stringify({ url: currentUrl, quality: selectedQuality, cookies_content: cookies, user_agent: userAgent }),
                     },
                     MAX_RETRIES,
                     RETRY_DELAY_MS,
