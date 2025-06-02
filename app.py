@@ -175,7 +175,6 @@ def fetch_info():
     data = request.get_json()
     url = data.get('url')
     cookies_content = data.get('cookies_content')
-    user_agent_from_client = data.get('user_agent') # Get User-Agent from client
 
     if not url:
         return jsonify({'error': 'URL is required'}), 400
@@ -199,14 +198,9 @@ def fetch_info():
             'skip_download': True,
             'forcejson': True,
             'youtube_skip_dash_manifest': True,
-            # Default User-Agent, will be overridden if client provides one
+            # Default User-Agent
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        if user_agent_from_client and user_agent_from_client.strip():
-            base_ydl_opts['user_agent'] = user_agent_from_client.strip()
-            print(f"INFO: Using client-provided User-Agent for yt-dlp: {base_ydl_opts['user_agent']}")
-        elif YTDLP_PROXY_URL: # Keep this condition if you want to show proxy usage regardless of UA
-             print(f"INFO: Using default User-Agent for yt-dlp with proxy: {base_ydl_opts['user_agent']}")
 
         if YTDLP_PROXY_URL:
             base_ydl_opts['proxy'] = YTDLP_PROXY_URL
@@ -394,7 +388,6 @@ def download_video():
     url = data.get('url')
     quality = data.get('quality', 'best')
     cookies_content = data.get('cookies_content')
-    user_agent_from_client = data.get('user_agent') # Get User-Agent from client
 
     if not url or not quality:
         return jsonify({'error': 'URL and quality are required'}), 400
@@ -424,16 +417,9 @@ def download_video():
                 'Connection': 'keep-alive',
             },
             'youtube_skip_dash_manifest': True,
-            # Default User-Agent for yt-dlp internal operations, will be overridden
+            # Default User-Agent for yt-dlp internal operations
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        if user_agent_from_client and user_agent_from_client.strip():
-            base_ydl_opts['user_agent'] = user_agent_from_client.strip()
-            # Also update http_headers User-Agent if client provides one, for consistency
-            base_ydl_opts['http_headers']['User-Agent'] = user_agent_from_client.strip()
-            print(f"INFO: Using client-provided User-Agent for yt-dlp download: {base_ydl_opts['user_agent']}")
-        elif YTDLP_PROXY_URL:
-             print(f"INFO: Using default User-Agent for yt-dlp download with proxy: {base_ydl_opts['user_agent']}")
 
         if YTDLP_PROXY_URL:
             base_ydl_opts['proxy'] = YTDLP_PROXY_URL

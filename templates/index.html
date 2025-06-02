@@ -386,13 +386,6 @@
                 <p class="mt-1 text-xs text-gray-400">Required for age-restricted or private videos. Export from browser using an extension like 'EditThisCookie' or 'Cookie-Editor'.</p>
             </div>
 
-            <!-- User-Agent Input -->
-            <div class="mb-6">
-                <label for="userAgentInput" class="block mb-2 text-sm font-medium text-gray-300">Browser User-Agent (Optional, but recommended if using cookies):</label>
-                <textarea id="userAgentInput" name="user_agent_content" rows="2" class="w-full p-2.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-200 placeholder-gray-400 focus:ring-blue-500 focus:border-blue-500 text-sm shadow-sm resize-y" placeholder="Paste your browser's User-Agent string here (e.g., Mozilla/5.0 ...)"></textarea>
-                <p class="mt-1 text-xs text-gray-400">Find by searching "my user agent" in your browser. Helps make requests look like they came from your browser when using cookies.</p>
-            </div>
-
             <button id="fetchInfoBtn" class="btn btn-primary w-full">
                 <svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                     <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd" />
@@ -486,7 +479,6 @@
         const downloadBtn = document.getElementById('downloadBtn');
         const youtubeUrlInput = document.getElementById('youtubeUrl');
         const cookiesContentInput = document.getElementById('cookiesContent');
-        const userAgentInput = document.getElementById('userAgentInput');
         const videoInfoDiv = document.getElementById('videoInfo');
         const loadingSpinner = document.getElementById('loadingSpinner');
         const errorMessageDiv = document.getElementById('errorMessage');
@@ -598,7 +590,6 @@
         fetchInfoBtn.addEventListener('click', async () => {
             currentUrl = youtubeUrlInput.value.trim();
             const cookies = cookiesContentInput.value.trim();
-            const userAgent = userAgentInput.value.trim();
 
             if (!currentUrl) {
                 displayError('Please enter a YouTube URL.');
@@ -623,7 +614,7 @@
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({ url: currentUrl, cookies_content: cookies, user_agent: userAgent }),
+                        body: JSON.stringify({ url: currentUrl, cookies_content: cookies }),
                     },
                     MAX_RETRIES,
                     RETRY_DELAY_MS,
@@ -717,7 +708,6 @@
         downloadBtn.addEventListener('click', async () => {
             const selectedQuality = qualitySelect.value;
             const cookies = cookiesContentInput.value.trim();
-            const userAgent = userAgentInput.value.trim();
 
             if (!currentUrl) {
                 displayError('No URL specified. Please fetch info first.');
@@ -764,7 +754,7 @@
                         headers: {
                             'Content-Type': 'application/json',
                         },
-                        body: JSON.stringify({ url: currentUrl, quality: selectedQuality, cookies_content: cookies, user_agent: userAgent }),
+                        body: JSON.stringify({ url: currentUrl, quality: selectedQuality, cookies_content: cookies }),
                     },
                     MAX_RETRIES,
                     RETRY_DELAY_MS,
