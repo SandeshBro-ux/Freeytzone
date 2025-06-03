@@ -236,6 +236,18 @@ def fetch_info():
         cookies_file_path = create_cookie_file(cookies_content, f"fetch_{video_id}")
         if cookies_file_path:
             app.logger.info(f"Created temporary cookie file: {cookies_file_path}")
+            # Add diagnostic info about cookies
+            try:
+                if os.path.exists(cookies_file_path):
+                    with open(cookies_file_path, 'r', encoding='utf-8') as f:
+                        cookie_content = f.read()
+                        cookie_lines = cookie_content.strip().split('\n')
+                        auth_cookies = [line for line in cookie_lines if any(cookie in line for cookie in ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LOGIN_INFO'])]
+                        app.logger.debug(f"Cookie file has {len(cookie_lines)} lines, contains {len(auth_cookies)} authentication cookies")
+                        if len(auth_cookies) == 0:
+                            app.logger.warning("No critical authentication cookies (SID, HSID, SSID, APISID, SAPISID, LOGIN_INFO) found. This may limit access to age-restricted or private videos.")
+            except Exception as cookie_diag_err:
+                app.logger.debug(f"Error analyzing cookies: {str(cookie_diag_err)}")
         else:
             app.logger.info("No valid cookies content provided or failed to create cookie file.")
         
@@ -365,12 +377,15 @@ def fetch_info():
             
             # Check if the error contains "Video unavailable" which is a specific YouTube error
             # This typically means the video is genuinely unavailable rather than an access issue
+            error_status_code = 500  # Default to server error
             if hasattr(app, '_last_yt_dlp_error') and app._last_yt_dlp_error:
                 if "video unavailable" in app._last_yt_dlp_error.lower():
                     last_error_msg = "This video is not available. It may be private, deleted, age-restricted, or region-blocked in our server's location."
                     app.logger.warning(f"YouTube reports video {video_id} is unavailable. This is likely a genuine content restriction, not an error in our code.")
+                    error_status_code = 404  # Not found is more appropriate for unavailable content
                 elif "http error 429" in app._last_yt_dlp_error.lower() or "too many requests" in app._last_yt_dlp_error.lower():
                     encountered_429 = True
+                    error_status_code = 429
             
             if encountered_429:
                 return jsonify({
@@ -378,8 +393,10 @@ def fetch_info():
                 }), 429
             else:
                 return jsonify({
-                    'error': f'Failed to fetch video info from yt-dlp. {last_error_msg}'
-                }), 500
+                    'error': f'Failed to fetch video info from yt-dlp: {last_error_msg}',
+                    'video_id': video_id,
+                    'is_unavailable': "video unavailable" in app._last_yt_dlp_error.lower() if hasattr(app, '_last_yt_dlp_error') else False
+                }), error_status_code
 
         app.logger.info(f"Successfully fetched info_dict for {url}. Title: {info_dict.get('title')}")
         

@@ -412,11 +412,29 @@
                 <div class="text" data-text="fetching"></div>
             </div>
         </div>
-        <div id="errorMessage" class="error-message my-6" style="display: none;">
-            <svg class="icon text-red-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-            </svg>
-            <span id="errorText"></span>
+        <div id="errorMessage" class="hidden">
+            <div class="bg-red-50 border border-red-100 rounded-md p-4 mb-5 flex">
+                <div class="flex-shrink-0">
+                    <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                    </svg>
+                </div>
+                <div class="ml-3">
+                    <h3 class="text-sm font-medium text-red-800" id="errorText">Error message here</h3>
+                    <div id="errorDetails" class="mt-2 text-sm text-red-700 hidden">
+                        <!-- Additional error details will appear here -->
+                    </div>
+                    <div id="unavailableHelp" class="mt-2 text-sm text-gray-600 hidden">
+                        <p>This typically happens when:</p>
+                        <ul class="list-disc pl-5 mt-1">
+                            <li>The video has been deleted or made private by the owner</li>
+                            <li>The video is geo-restricted and not available in our server's region</li>
+                            <li>The video requires age verification or account login</li>
+                        </ul>
+                        <p class="mt-2">Try providing complete authentication cookies from an active YouTube session to access restricted content.</p>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div id="videoInfo" class="mt-10 hidden bg-gray-800 p-6 rounded-lg shadow-md">
@@ -501,42 +519,45 @@
         ];
 
         // Helper function for retrying fetch operations
-        async function fetchWithRetries(url, options, maxRetries, delayMs, errorDisplayFn, initialErrorMsg) {
+        async function fetchWithRetries(url, options, onSuccess, maxRetries = 2) {
             let retries = 0;
-            let lastError = null;
-            let firstNetworkErrorDisplayed = false;
-
-            while (retries < maxRetries) {
+            while (retries <= maxRetries) {
                 try {
-                    console.log(`Attempt ${retries + 1} for ${url}`);
                     const response = await fetch(url, options);
-                    if (response.ok) {
-                        return await response.json(); // Success
-                    }
-                    // Server responded with an error (4xx, 5xx)
-                    lastError = await response.json(); // Get error details from server
-                    errorDisplayFn(lastError.error || `Server error: ${response.status}`);
-                    return null; // Don't retry server-side errors
-                } catch (error) {
-                    // Network error or other fetch-related issue
-                    console.error(`Fetch attempt ${retries + 1} failed for ${url}:`, error);
-                    lastError = error; // Store the error object
-                    if (!firstNetworkErrorDisplayed) {
-                        errorDisplayFn(initialErrorMsg); // Show initial error only on the first network failure
-                        firstNetworkErrorDisplayed = true;
-                    }
-                    retries++;
-                    if (retries < maxRetries) {
-                        console.log(`Retrying in ${delayMs / 1000}s... (${retries}/${maxRetries})`);
-                        await new Promise(resolve => setTimeout(resolve, delayMs));
-                    } else {
-                        // All retries exhausted for network error
-                        errorDisplayFn(`${initialErrorMsg} (Failed after ${maxRetries} attempts)`);
+                    const data = await response.json();
+                    
+                    if (!response.ok) {
+                        // Check if we should show the unavailable video guidance
+                        const isUnavailable = data.is_unavailable || response.status === 404;
+                        const statusCode = response.status;
+                        
+                        if (retries < maxRetries) {
+                            console.log(`Request failed with status ${response.status}, retrying (${retries + 1}/${maxRetries})...`);
+                            retries++;
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            continue;
+                        }
+                        
+                        console.error(`Request failed after ${maxRetries} retries with status ${response.status}:`, data);
+                        displayError(data.error || `Failed with status code ${response.status}`, statusCode, isUnavailable);
                         return null;
                     }
+                    
+                    onSuccess(data);
+                    return data;
+                } catch (error) {
+                    if (retries < maxRetries) {
+                        console.log(`Request threw error, retrying (${retries + 1}/${maxRetries})...`, error);
+                        retries++;
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        continue;
+                    }
+                    
+                    console.error(`Request failed after ${maxRetries} retries:`, error);
+                    displayError(`Network error: ${error.message || 'Could not connect to server'}`);
+                    return null;
                 }
             }
-            return null; // Should not be reached if logic is correct
         }
 
         document.addEventListener('DOMContentLoaded', () => {
@@ -616,82 +637,78 @@
                         },
                         body: JSON.stringify({ url: currentUrl, cookies_content: cookies }),
                     },
-                    MAX_RETRIES,
-                    RETRY_DELAY_MS,
-                    displayError, // Function to call to display errors
-                    "Failed to connect to server for fetching info."
-                );
-
-                if (data) { // If fetchWithRetries returned data (i.e., was successful)
-                    currentChannelId = data.channel_id || '';
-                    const thumbnailEl = document.getElementById('thumbnail');
-                    if (thumbnailEl) thumbnailEl.src = data.thumbnail || '';
-                    const titleEl = document.getElementById('title');
-                    if (titleEl) titleEl.textContent = data.title || 'N/A';
-                    const channelLogoEl = document.getElementById('channelLogo');
-                    if (channelLogoEl) channelLogoEl.src = data.channel_logo || '';
-                    const channelNameEl = document.getElementById('channelName');
-                    if (channelNameEl) channelNameEl.textContent = data.channel_name || 'N/A';
-                    const subscribersEl = document.getElementById('subscribers');
-                    if (subscribersEl) subscribersEl.textContent = data.subscribers || 'N/A';
-                    const viewsEl = document.getElementById('views');
-                    if (viewsEl) viewsEl.textContent = data.views || 'N/A';
-                    const likesEl = document.getElementById('likes');
-                    if (likesEl) likesEl.textContent = data.likes || 'N/A';
-                    const commentsEl = document.getElementById('comments');
-                    if (commentsEl) commentsEl.textContent = data.comments || 'N/A';
-                    const descriptionEl = document.getElementById('description');
-                    if (descriptionEl) descriptionEl.textContent = data.description || 'N/A';
-                    const maxQualityEl = document.getElementById('maxQuality');
-                    if (maxQualityEl) maxQualityEl.textContent = data.max_quality || 'N/A';
-                    const durationEl = document.getElementById('duration');
-                    if (durationEl) durationEl.textContent = data.duration || 'N/A';
-                    const videoOptgroup = qualitySelect.querySelector('optgroup[label="Video Downloads"]');
-                    if (videoOptgroup) {
-                        videoOptgroup.innerHTML = '';
-                        let bestQualityNumeric = 0;
-                        if (data.max_quality.includes("4K")) bestQualityNumeric = 2160;
-                        else if (data.max_quality.includes("2K")) bestQualityNumeric = 1440;
-                        else if (data.max_quality.includes("1080p")) bestQualityNumeric = 1080;
-                        else if (data.max_quality.includes("720p")) bestQualityNumeric = 720;
-                        else if (data.max_quality.includes("480p")) bestQualityNumeric = 480;
-                        else if (data.max_quality.includes("360p")) bestQualityNumeric = 360;
-                        else {
-                            const pValueMatch = data.max_quality.match(/(\d+)p/);
-                            if (pValueMatch && pValueMatch[1]){
-                                bestQualityNumeric = parseInt(pValueMatch[1], 10);
-                            }
-                        }
-                        if (bestQualityNumeric === 2160) bestQualityNumeric = 1440;
-                        let defaultSelectedQualityValue = null;
-                        allVideoQualities.forEach(quality => {
-                            if (quality.numeric <= bestQualityNumeric) {
-                                const option = document.createElement('option');
-                                option.value = quality.value;
-                                option.textContent = quality.text;
-                                videoOptgroup.appendChild(option);
-                                if (!defaultSelectedQualityValue) {
-                                    defaultSelectedQualityValue = quality.value;
+                    (data) => {
+                        currentChannelId = data.channel_id || '';
+                        const thumbnailEl = document.getElementById('thumbnail');
+                        if (thumbnailEl) thumbnailEl.src = data.thumbnail || '';
+                        const titleEl = document.getElementById('title');
+                        if (titleEl) titleEl.textContent = data.title || 'N/A';
+                        const channelLogoEl = document.getElementById('channelLogo');
+                        if (channelLogoEl) channelLogoEl.src = data.channel_logo || '';
+                        const channelNameEl = document.getElementById('channelName');
+                        if (channelNameEl) channelNameEl.textContent = data.channel_name || 'N/A';
+                        const subscribersEl = document.getElementById('subscribers');
+                        if (subscribersEl) subscribersEl.textContent = data.subscribers || 'N/A';
+                        const viewsEl = document.getElementById('views');
+                        if (viewsEl) viewsEl.textContent = data.views || 'N/A';
+                        const likesEl = document.getElementById('likes');
+                        if (likesEl) likesEl.textContent = data.likes || 'N/A';
+                        const commentsEl = document.getElementById('comments');
+                        if (commentsEl) commentsEl.textContent = data.comments || 'N/A';
+                        const descriptionEl = document.getElementById('description');
+                        if (descriptionEl) descriptionEl.textContent = data.description || 'N/A';
+                        const maxQualityEl = document.getElementById('maxQuality');
+                        if (maxQualityEl) maxQualityEl.textContent = data.max_quality || 'N/A';
+                        const durationEl = document.getElementById('duration');
+                        if (durationEl) durationEl.textContent = data.duration || 'N/A';
+                        const videoOptgroup = qualitySelect.querySelector('optgroup[label="Video Downloads"]');
+                        if (videoOptgroup) {
+                            videoOptgroup.innerHTML = '';
+                            let bestQualityNumeric = 0;
+                            if (data.max_quality.includes("4K")) bestQualityNumeric = 2160;
+                            else if (data.max_quality.includes("2K")) bestQualityNumeric = 1440;
+                            else if (data.max_quality.includes("1080p")) bestQualityNumeric = 1080;
+                            else if (data.max_quality.includes("720p")) bestQualityNumeric = 720;
+                            else if (data.max_quality.includes("480p")) bestQualityNumeric = 480;
+                            else if (data.max_quality.includes("360p")) bestQualityNumeric = 360;
+                            else {
+                                const pValueMatch = data.max_quality.match(/(\d+)p/);
+                                if (pValueMatch && pValueMatch[1]){
+                                    bestQualityNumeric = parseInt(pValueMatch[1], 10);
                                 }
                             }
-                        });
-                        if (defaultSelectedQualityValue) {
-                            qualitySelect.value = defaultSelectedQualityValue;
+                            if (bestQualityNumeric === 2160) bestQualityNumeric = 1440;
+                            let defaultSelectedQualityValue = null;
+                            allVideoQualities.forEach(quality => {
+                                if (quality.numeric <= bestQualityNumeric) {
+                                    const option = document.createElement('option');
+                                    option.value = quality.value;
+                                    option.textContent = quality.text;
+                                    videoOptgroup.appendChild(option);
+                                    if (!defaultSelectedQualityValue) {
+                                        defaultSelectedQualityValue = quality.value;
+                                    }
+                                }
+                            });
+                            if (defaultSelectedQualityValue) {
+                                qualitySelect.value = defaultSelectedQualityValue;
+                            } else {
+                                const option = document.createElement('option');
+                                option.value = "360p";
+                                option.textContent = "360p (Not available)";
+                                option.disabled = true;
+                                videoOptgroup.appendChild(option);
+                                qualitySelect.value = "360p";
+                            }
                         } else {
-                            const option = document.createElement('option');
-                            option.value = "360p";
-                            option.textContent = "360p (Not available)";
-                            option.disabled = true;
-                            videoOptgroup.appendChild(option);
-                            qualitySelect.value = "360p";
+                            console.error("Video Downloads optgroup not found!");
                         }
-                    } else {
-                        console.error("Video Downloads optgroup not found!");
-                    }
-                    updateDownloadButtonText();
-                    videoInfoDiv.classList.remove('hidden');
-                    errorMessageDiv.style.display = 'none'; // Hide error message on success
-                } // If data is null, fetchWithRetries already handled displaying the final error.
+                        updateDownloadButtonText();
+                        videoInfoDiv.classList.remove('hidden');
+                        errorMessageDiv.style.display = 'none'; // Hide error message on success
+                    },
+                    MAX_RETRIES
+                );
             } finally {
                 // Reset button state in finally block
                 loadingSpinner.classList.add('hidden');
@@ -756,54 +773,50 @@
                         },
                         body: JSON.stringify({ url: currentUrl, quality: selectedQuality, cookies_content: cookies }),
                     },
-                    MAX_RETRIES,
-                    RETRY_DELAY_MS,
-                    displayError, // Use general displayError for now, but it will show in #errorMessageDiv
-                    "Failed to connect to server for download."
-                );
-
-                if (data) { // If fetchWithRetries returned data (i.e., was successful)
-                    if (downloadStatus) {
-                        let successMessageHtml;
-                        const selectedQualityValue = qualitySelect.value;
-                        if (selectedQualityValue === 'mp3') {
-                            successMessageHtml = `
-                                <svg class="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
-                                    <circle class="checkmark__circle" cx="26" cy="26" r="25" fill="none"/>
-                                    <path class="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8"/>
-                                </svg>
-                                <p class="text-green-400">Audio downloaded successfully! Open ${data.filename} (or similar if auto-renamed) in your device to listen to your audio.</p>
-                            `;
-                        } else {
-                            successMessageHtml = `
-                                <svg class="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
-                                    <circle class="checkmark__circle" cx="26" cy="26" r="25" fill="none"/>
-                                    <path class="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8"/>
-                                </svg>
-                                <p class="text-green-400">Download Succeeded! Preparing ${data.filename}...</p>
-                                <p class="text-xs text-gray-500 mt-1">Your browser will prompt you to save the file.</p>
-                            `;
-                        }
-                        downloadStatus.innerHTML = successMessageHtml;
-                        const checkmarkSvg = downloadStatus.querySelector('.checkmark');
-                        if(checkmarkSvg) checkmarkSvg.style.display = 'block';
-                        
-                        setTimeout(() => {
-                            if(downloadStatus) {
-                                downloadStatus.innerHTML = '';
-                                downloadStatus.className = 'mt-4 text-sm text-gray-400 text-center';
+                    (data) => {
+                        if (downloadStatus) {
+                            let successMessageHtml;
+                            const selectedQualityValue = qualitySelect.value;
+                            if (selectedQualityValue === 'mp3') {
+                                successMessageHtml = `
+                                    <svg class="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
+                                        <circle class="checkmark__circle" cx="26" cy="26" r="25" fill="none"/>
+                                        <path class="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8"/>
+                                    </svg>
+                                    <p class="text-green-400">Audio downloaded successfully! Open ${data.filename} (or similar if auto-renamed) in your device to listen to your audio.</p>
+                                `;
+                            } else {
+                                successMessageHtml = `
+                                    <svg class="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
+                                        <circle class="checkmark__circle" cx="26" cy="26" r="25" fill="none"/>
+                                        <path class="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8"/>
+                                    </svg>
+                                    <p class="text-green-400">Download Succeeded! Preparing ${data.filename}...</p>
+                                    <p class="text-xs text-gray-500 mt-1">Your browser will prompt you to save the file.</p>
+                                `;
                             }
-                        }, 7000);
-                    }
-                    // Trigger the actual file download via browser
-                    const link = document.createElement('a');
-                    link.href = data.download_url;
-                    link.setAttribute('download', data.filename || 'video.mp4');
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-                    errorMessageDiv.style.display = 'none'; // Hide general error on download success
-                } // If data is null, fetchWithRetries already handled displaying the final error message.
+                            downloadStatus.innerHTML = successMessageHtml;
+                            const checkmarkSvg = downloadStatus.querySelector('.checkmark');
+                            if(checkmarkSvg) checkmarkSvg.style.display = 'block';
+                            
+                            setTimeout(() => {
+                                if(downloadStatus) {
+                                    downloadStatus.innerHTML = '';
+                                    downloadStatus.className = 'mt-4 text-sm text-gray-400 text-center';
+                                }
+                            }, 7000);
+                        }
+                        // Trigger the actual file download via browser
+                        const link = document.createElement('a');
+                        link.href = data.download_url;
+                        link.setAttribute('download', data.filename || 'video.mp4');
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        errorMessageDiv.style.display = 'none'; // Hide general error on download success
+                    },
+                    MAX_RETRIES
+                );
             } finally {
                 // Hide loading spinner after download (success or failure)
                 loadingSpinner.classList.add('hidden');
@@ -814,28 +827,44 @@
             }
         });
 
-        function displayError(message) {
-            // Log the exact message received by this function for easier debugging
-            console.log("displayError called with message:", message);
-            if (downloadStatus) { // Also clear download status when a general error is shown
-                downloadStatus.innerHTML = ''; 
+        function displayError(message, statusCode, isUnavailable) {
+            console.log("displayError called with:", { message, statusCode, isUnavailable });
+            
+            // Clear any download status when showing an error
+            if (downloadStatus) {
+                downloadStatus.innerHTML = '';
                 downloadStatus.className = 'mt-4 text-sm text-gray-400 text-center';
             }
 
-            const finalMessage = message || "An unexpected error occurred. Please check the console.";
-            console.error("Processed error message to display:", finalMessage);
-
+            const finalMessage = message || "An unexpected error occurred.";
+            
             if (errorTextSpan) {
-                errorTextSpan.textContent = ''; // Clear it first
                 errorTextSpan.textContent = finalMessage;
-            } else {
-                console.error("errorTextSpan is null, cannot set error message in UI.");
             }
+            
+            // Handle specific error types
+            const errorDetailsEl = document.getElementById('errorDetails');
+            const unavailableHelpEl = document.getElementById('unavailableHelp');
+            
+            if (errorDetailsEl) {
+                errorDetailsEl.classList.add('hidden');
+                errorDetailsEl.innerHTML = '';
+            }
+            
+            if (unavailableHelpEl) {
+                if (isUnavailable || statusCode === 404) {
+                    unavailableHelpEl.classList.remove('hidden');
+                } else {
+                    unavailableHelpEl.classList.add('hidden');
+                }
+            }
+
+            // Show the error message div
             if (errorMessageDiv) {
-                errorMessageDiv.style.display = 'flex'; // Make it visible
-            } else {
-                console.error("errorMessageDiv is null, cannot make error message visible.");
+                errorMessageDiv.style.display = 'flex';
             }
+            
+            // Hide the video info div
             if (videoInfoDiv) {
                 videoInfoDiv.classList.add('hidden');
             }
