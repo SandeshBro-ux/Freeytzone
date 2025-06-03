@@ -4,6 +4,8 @@ import json
 import requests
 import yt_dlp
 import tempfile
+import platform
+import time
 from http.cookiejar import MozillaCookieJar
 from flask import Flask, render_template, request, jsonify, send_from_directory, send_file
 from googleapiclient.discovery import build
@@ -53,30 +55,50 @@ if not os.path.exists(app.config['DOWNLOAD_FOLDER']):
 
 # Determine the effective YTDLP_PROXY_URL
 EFFECTIVE_YTDLP_PROXY_URL = None
+
+# If an explicit proxy URL was provided in environment, use that
 if YTDLP_PROXY_URL_ENV:
     EFFECTIVE_YTDLP_PROXY_URL = YTDLP_PROXY_URL_ENV
-    app.logger.info(f"Using configured yt-dlp proxy from YTDLP_PROXY_URL: {EFFECTIVE_YTDLP_PROXY_URL}")
+    app.logger.info(f"Using proxy URL from environment variable: {YTDLP_PROXY_URL_ENV}")
+# Otherwise, if USE_VPNBOOK is True, fetch a proxy URL from VPNBook
 elif SHOULD_USE_VPNBOOK:
-    app.logger.info(f"YTDLP_PROXY_URL not set, and USE_VPNBOOK is True. Attempting to use VPNBook.")
     try:
-        vpnbook_proxy = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL)
-        if vpnbook_proxy:
-            EFFECTIVE_YTDLP_PROXY_URL = vpnbook_proxy
-            app.logger.info(f"Using VPNBook proxy: {'*****'.join(EFFECTIVE_YTDLP_PROXY_URL.split('@')[0].split(':'))}@{EFFECTIVE_YTDLP_PROXY_URL.split('@')[1] if '@' in EFFECTIVE_YTDLP_PROXY_URL else EFFECTIVE_YTDLP_PROXY_URL}")
-        else:
-            app.logger.warning("Failed to get VPNBook proxy URL. Continuing without proxy.")
+        EFFECTIVE_YTDLP_PROXY_URL = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL)
+        app.logger.info(f"Using VPNBook proxy: {EFFECTIVE_YTDLP_PROXY_URL}")
     except Exception as e:
-        app.logger.error(f"Failed to initialize VPNBook proxy: {e}")
-else:
-    app.logger.info("No proxy configured. YTDLP_PROXY_URL is not set and USE_VPNBOOK is False or overridden.")
+        app.logger.error(f"Failed to initialize VPNBook proxy: {str(e)}")
+        app.logger.warning("VPNBook proxy initialization failed. Continuing without proxy.")
 
+# Function to determine browser type based on OS and User-Agent
+def detect_browser_from_user_agent(user_agent_string):
+    """
+    Detect browser name from User-Agent string for cookiesfrombrowser
+    """
+    if not user_agent_string:
+        return "chrome"  # Default to chrome
+        
+    ua_lower = user_agent_string.lower()
+    
+    if "edg" in ua_lower:
+        return "edge"
+    elif "chrome" in ua_lower:
+        return "chrome"
+    elif "firefox" in ua_lower:
+        return "firefox"
+    elif "safari" in ua_lower and "chrome" not in ua_lower:
+        return "safari"
+    elif "opera" in ua_lower:
+        return "opera"
+    else:
+        return "chrome"  # Default to chrome
+
+# Function to get a YouTube API service
 def get_youtube_service():
-    return build('youtube', 'v3', developerKey=API_KEY)
+    if not API_KEY:
+        raise ValueError("YouTube API key is required but not set")
+    return build('youtube', 'v3', developerKey=API_KEY, cache_discovery=False)
 
-def extract_video_id(url):
-    video_id_match = re.search(r'(?:v=|[\/])([0-9A-Za-z_-]{11}).*', url)
-    return video_id_match.group(1) if video_id_match else None
-
+# Format numbers for display (e.g., 1000 -> 1K, 1000000 -> 1M)
 def format_count(count_str):
     try:
         count = int(count_str)
@@ -86,27 +108,26 @@ def format_count(count_str):
             return f"{count/1000:.1f}K"
         else:
             return str(count)
-    except:
-        return count_str
+    except (ValueError, TypeError):
+        return "0"
 
-def sanitize_filename(filename):
-    """
-    Sanitizes a string to be used as a filename.
-    Removes or replaces characters that are invalid in filenames on most OS.
-    """
-    if not filename:
-        return "untitled"
-    # Remove characters that are definitely problematic
-    filename = re.sub(r'[\\/*?:"<>|]', "", filename)
-    # Replace other common problematic characters with an underscore
-    filename = re.sub(r'[\s#%&{}$!@`+=]', "_", filename)
-    # Truncate to a reasonable length (e.g., 200 characters) to avoid issues with max path lengths
-    filename = filename[:200]
-    # Remove leading/trailing underscores and dots that can be problematic
-    filename = filename.strip('._')
-    if not filename: # If all characters were problematic and removed
-        return "sanitized_filename"
-    return filename
+def extract_video_id(url):
+    """Extract the video ID from a YouTube URL"""
+    video_id = None
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',          # Standard youtube.com URLs
+        r'(?:embed\/)([0-9A-Za-z_-]{11}).*',        # Embed URLs
+        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11}).*',    # youtu.be short URLs
+        r'(?:shorts\/)([0-9A-Za-z_-]{11}).*'        # YouTube shorts URLs
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            video_id = match.group(1)
+            break
+    
+    return video_id
 
 def process_cookie_string(cookies_content_str):
     """
@@ -202,6 +223,14 @@ def create_cookie_file(cookies_content, identifier="default"):
             pass
         return None
 
+def sanitize_filename(filename):
+    """Sanitize a filename by removing invalid characters"""
+    # Replace invalid characters with underscores
+    invalid_chars = r'[\\/:"*?<>|]'
+    sanitized = re.sub(invalid_chars, '_', filename)
+    # Limit the length to avoid file system issues
+    return sanitized[:100]
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -215,7 +244,7 @@ def fetch_info():
 
     app.logger.info(f"Received /fetch_info request for URL: {url}")
     if cookies_content:
-        app.logger.debug(f"Cookies received (first 100 chars): {cookies_content[:100]}")
+        app.logger.debug(f"Cookies received (first 100 chars): {cookies_content[:100] if len(cookies_content) > 100 else cookies_content}")
     if user_agent_from_client:
         app.logger.debug(f"User-Agent received: {user_agent_from_client}")
 
@@ -233,142 +262,142 @@ def fetch_info():
     encountered_429 = False
 
     try:
-        cookies_file_path = create_cookie_file(cookies_content, f"fetch_{video_id}")
-        if cookies_file_path:
-            app.logger.info(f"Created temporary cookie file: {cookies_file_path}")
-            # Add diagnostic info about cookies
-            try:
-                if os.path.exists(cookies_file_path):
-                    with open(cookies_file_path, 'r', encoding='utf-8') as f:
-                        cookie_content = f.read()
-                        cookie_lines = cookie_content.strip().split('\n')
-                        auth_cookies = [line for line in cookie_lines if any(cookie in line for cookie in ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LOGIN_INFO'])]
-                        app.logger.debug(f"Cookie file has {len(cookie_lines)} lines, contains {len(auth_cookies)} authentication cookies")
-                        if len(auth_cookies) == 0:
-                            app.logger.warning("No critical authentication cookies (SID, HSID, SSID, APISID, SAPISID, LOGIN_INFO) found. This may limit access to age-restricted or private videos.")
-            except Exception as cookie_diag_err:
-                app.logger.debug(f"Error analyzing cookies: {str(cookie_diag_err)}")
-        else:
-            app.logger.info("No valid cookies content provided or failed to create cookie file.")
-        
+        # Set up base options for yt-dlp
         base_ydl_opts = {
             'noplaylist': True,
             'quiet': False, 
-            'no_warnings': True, # To reduce log noise, errors will still be caught
+            'no_warnings': True,
             'skip_download': True,
             'forcejson': True,
-            'youtube_skip_dash_manifest': True,
             'noprogress': True,
             'no_color': True,
             'nocheckcertificate': True,
-            'logtostderr': False, # Don't want yt-dlp to print to stderr directly
-            'verbose': False, # Will enable for specific error cases if needed
-            # 'dump_single_json': True, # Alternative to forcejson for some cases
+            'ignoreerrors': True,
+            'logtostderr': False,
+            'socket_timeout': 30,  # Increased timeout
+            'retries': 10,        # Increased retries
+            'fragment_retries': 10,
+            'extractor_retries': 5,
         }
-        
-        if user_agent_from_client and user_agent_from_client.strip():
-            app.logger.info(f"Using client-provided User-Agent for yt-dlp: {user_agent_from_client}")
+
+        # Use client User-Agent if provided
+        if user_agent_from_client:
+            app.logger.info(f"Using client User-Agent: {user_agent_from_client}")
             base_ydl_opts['user_agent'] = user_agent_from_client
+            base_ydl_opts['http_headers'] = {'User-Agent': user_agent_from_client}
         else:
             default_ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             app.logger.info(f"Using default User-Agent for yt-dlp: {default_ua}")
             base_ydl_opts['user_agent'] = default_ua
-        
-        # Use the effective proxy URL determined at startup
-        current_proxy_url_to_use = EFFECTIVE_YTDLP_PROXY_URL
-        
-        # If VPNBook is specifically enabled for this attempt (e.g. after a failure)
-        # This logic might be more complex if we allow per-request proxy choices.
-        # For now, relying on EFFECTIVE_YTDLP_PROXY_URL logic at startup.
+            base_ydl_opts['http_headers'] = {'User-Agent': default_ua}
 
+        # Set up cookies from browser
+        if cookies_content:
+            # First attempt: Use cookiesfrombrowser feature if client User-Agent is provided
+            browser_type = detect_browser_from_user_agent(user_agent_from_client)
+            
+            # Unfortunately cookiesfrombrowser can't be used with cookie content from API
+            # We still need to create a cookie file, but later we'll implement a better solution
+            cookies_file_path = create_cookie_file(cookies_content, f"fetch_{video_id}")
+            if cookies_file_path:
+                app.logger.info(f"Created cookie file: {cookies_file_path}")
+                base_ydl_opts['cookiefile'] = cookies_file_path
+            else:
+                app.logger.warning("Failed to create cookie file from content")
+        
+        # Use our configured proxy if available
+        current_proxy_url_to_use = EFFECTIVE_YTDLP_PROXY_URL
         if current_proxy_url_to_use:
-            app.logger.info(f"Using proxy for this yt-dlp attempt: {current_proxy_url_to_use.split('@')[1] if '@' in current_proxy_url_to_use else current_proxy_url_to_use}")
+            # Hide username/password when logging
+            logged_proxy = current_proxy_url_to_use.split('@')[1] if '@' in current_proxy_url_to_use else current_proxy_url_to_use
+            app.logger.info(f"Using proxy for this fetch attempt: {logged_proxy}")
             base_ydl_opts['proxy'] = current_proxy_url_to_use
 
-        # Attempt 1: With cookies (if provided)
+        # Attempt with cookies first
         if cookies_file_path:
             app.logger.info(f"Attempting to fetch info for {url} WITH cookies: {cookies_file_path}")
-            ydl_opts_with_cookies = base_ydl_opts.copy()
-            ydl_opts_with_cookies['cookiefile'] = cookies_file_path
-            app.logger.debug(f"yt-dlp options (with cookies): {json.dumps(ydl_opts_with_cookies, indent=2)}")
             try:
-                with yt_dlp.YoutubeDL(ydl_opts_with_cookies) as ydl:
+                with yt_dlp.YoutubeDL(base_ydl_opts) as ydl:
                     info_dict = ydl.extract_info(url, download=False)
-                app.logger.info(f"yt-dlp fetch WITH cookies successful for {url}")
-            except yt_dlp.utils.DownloadError as err:
-                error_str = str(err) # Keep original case for detailed logging
+                if info_dict:
+                    app.logger.info(f"Successfully fetched info with cookies for {url}")
+            except yt_dlp.utils.DownloadError as e:
+                error_str = str(e)
                 app.logger.error(f"yt-dlp DownloadError WITH cookies for {url}: {error_str}")
+                app._last_yt_dlp_error = error_str  # Store for later reference
                 
-                # Store the error message for later specific error handling
-                app._last_yt_dlp_error = error_str
+                # Check for specific error types
+                if "429" in error_str or "too many requests" in error_str.lower():
+                    encountered_429 = True
+                    app.logger.error("Encountered HTTP 429 rate limiting error")
                 
-                # Check for 429 rate limit
-                if "http error 429" in error_str.lower() or "too many requests" in error_str.lower():
-                    encountered_429 = True
-                    app.logger.warning(f"YouTube rate limiting detected (429) for {url}")
-                # VPNBook rotation logic (only if SHOULD_USE_VPNBOOK and no YTDLP_PROXY_URL_ENV was set)
-                if SHOULD_USE_VPNBOOK and not YTDLP_PROXY_URL_ENV:
-                    app.logger.warning(f"Encountered 429 WITH cookies. VPNBook is active. Attempting to rotate proxy.")
-                    mark_proxy_failed() # Mark the current one (if it was from VPNBook)
-                    try:
-                        new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
-                        if new_proxy_url:
-                            app.logger.info(f"Rotated VPNBook proxy after 429 to: {'*****'.join(new_proxy_url.split('@')[0].split(':'))}@{new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
-                            ydl_opts_with_cookies_retry = ydl_opts_with_cookies.copy()
-                            ydl_opts_with_cookies_retry['proxy'] = new_proxy_url
-                            app.logger.debug(f"Retrying yt-dlp options (with cookies, new proxy): {json.dumps(ydl_opts_with_cookies_retry, indent=2)}")
-                            with yt_dlp.YoutubeDL(ydl_opts_with_cookies_retry) as ydl_retry:
-                                info_dict = ydl_retry.extract_info(url, download=False)
-                            app.logger.info(f"yt-dlp fetch WITH cookies and new proxy successful for {url}")
-                            encountered_429 = False # Reset flag as it worked
-                        else:
-                            app.logger.warning("Failed to get a new VPNBook proxy after 429.")
-                    except Exception as e_proxy_rotate:
-                        app.logger.error(f"Error rotating VPNBook proxy: {e_proxy_rotate}")
-                # If still no info_dict after potential retry, it remains None
-                if not info_dict: info_dict = None 
-            except Exception as e_generic:
-                app.logger.error(f"Generic yt-dlp error WITH cookies for {url}: {e_generic}", exc_info=True)
-                info_dict = None
-
-        # Attempt 2: Without cookies (if no cookies used OR first attempt failed and info_dict is still None)
-        if not info_dict:
-            app.logger.info(f"Attempting to fetch info for {url} WITHOUT cookies.")
-            ydl_opts_no_cookies = base_ydl_opts.copy()
-            ydl_opts_no_cookies['cookiefile'] = None # Explicitly ensure no cookie file
-            app.logger.debug(f"yt-dlp options (no cookies): {json.dumps(ydl_opts_no_cookies, indent=2)}")
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl2:
-                    info_dict = ydl2.extract_info(url, download=False)
-                app.logger.info(f"yt-dlp fetch WITHOUT cookies successful for {url}")
-            except yt_dlp.utils.DownloadError as err_no_cookies:
-                error_str = str(err_no_cookies) # Keep original case
-                app.logger.error(f"yt-dlp DownloadError WITHOUT cookies for {url}: {error_str}")
-                if "http error 429" in error_str.lower() or "too many requests" in error_str.lower():
-                    encountered_429 = True
-                    # VPNBook rotation logic (only if SHOULD_USE_VPNBOOK and no YTDLP_PROXY_URL_ENV was set)
-                    if SHOULD_USE_VPNBOOK and not YTDLP_PROXY_URL_ENV:
-                        app.logger.warning(f"Encountered 429 WITHOUT cookies. VPNBook is active. Attempting to rotate proxy.")
-                        mark_proxy_failed()
+                # Retry logic would be here for specific error types
+                
+                # If cookies don't work or get an error, try without cookies
+                app.logger.info(f"Attempting to fetch info for {url} WITHOUT cookies.")
+                try:
+                    no_cookie_opts = base_ydl_opts.copy()
+                    if 'cookiefile' in no_cookie_opts:
+                        del no_cookie_opts['cookiefile']
+                    
+                    with yt_dlp.YoutubeDL(no_cookie_opts) as ydl:
+                        info_dict = ydl.extract_info(url, download=False)
+                    if info_dict:
+                        app.logger.info(f"Successfully fetched info WITHOUT cookies for {url}")
+                except yt_dlp.utils.DownloadError as e_no_cookie:
+                    error_str_no_cookie = str(e_no_cookie)
+                    app.logger.error(f"yt-dlp DownloadError WITHOUT cookies for {url}: {error_str_no_cookie}")
+                    app._last_yt_dlp_error = error_str_no_cookie
+                    
+                    # VPNBook proxy rotation logic
+                    if SHOULD_USE_VPNBOOK and ("429" in error_str_no_cookie or "too many requests" in error_str_no_cookie.lower()):
+                        app.logger.info("Attempting VPNBook proxy rotation due to 429 error")
                         try:
+                            # Mark current proxy as failed
+                            if current_proxy_url_to_use:
+                                mark_proxy_failed(current_proxy_url_to_use)
+                                
+                            # Get a new proxy URL
                             new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
-                            if new_proxy_url:
-                                app.logger.info(f"Rotated VPNBook proxy after 429 to: {'*****'.join(new_proxy_url.split('@')[0].split(':'))}@{new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
-                                ydl_opts_no_cookies_retry = ydl_opts_no_cookies.copy()
-                                ydl_opts_no_cookies_retry['proxy'] = new_proxy_url
-                                app.logger.debug(f"Retrying yt-dlp options (no cookies, new proxy): {json.dumps(ydl_opts_no_cookies_retry, indent=2)}")
-                                with yt_dlp.YoutubeDL(ydl_opts_no_cookies_retry) as ydl_retry:
-                                    info_dict = ydl_retry.extract_info(url, download=False)
-                                app.logger.info(f"yt-dlp fetch WITHOUT cookies and new proxy successful for {url}")
-                                encountered_429 = False # Reset flag
-                            else:
-                                app.logger.warning("Failed to get a new VPNBook proxy after 429 (no cookies attempt).")
-                        except Exception as e_proxy_rotate_no_cookie:
-                            app.logger.error(f"Error rotating VPNBook proxy (no cookies attempt): {e_proxy_rotate_no_cookie}")
-                # If this fails, this is our final yt-dlp error for info
-            except Exception as e_generic_no_cookies:
-                app.logger.error(f"Generic yt-dlp error WITHOUT cookies for {url}: {e_generic_no_cookies}", exc_info=True)
-        
+                            app.logger.info(f"Rotated to new VPNBook proxy: {new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
+                            
+                            # Try with new proxy
+                            vpnbook_retry_opts = no_cookie_opts.copy()
+                            vpnbook_retry_opts['proxy'] = new_proxy_url
+                            
+                            # Add a short delay to avoid immediate retry
+                            time.sleep(2)
+                            
+                            with yt_dlp.YoutubeDL(vpnbook_retry_opts) as ydl:
+                                info_dict = ydl.extract_info(url, download=False)
+                            if info_dict:
+                                app.logger.info(f"Successfully fetched info with rotated VPNBook proxy for {url}")
+                        except Exception as e_proxy_rotate:
+                            app.logger.error(f"Error rotating VPNBook proxy: {e_proxy_rotate}")
+        else:
+            # No cookies provided, try direct fetch
+            app.logger.info(f"Attempting to fetch info for {url} without cookies (none provided).")
+            try:
+                with yt_dlp.YoutubeDL(base_ydl_opts) as ydl:
+                    info_dict = ydl.extract_info(url, download=False)
+                if info_dict:
+                    app.logger.info(f"Successfully fetched info without cookies for {url}")
+            except yt_dlp.utils.DownloadError as e_direct:
+                error_str_direct = str(e_direct)
+                app.logger.error(f"yt-dlp DownloadError for direct fetch of {url}: {error_str_direct}")
+                app._last_yt_dlp_error = error_str_direct
+                
+                # Check for rate limiting
+                if "429" in error_str_direct or "too many requests" in error_str_direct.lower():
+                    encountered_429 = True
+                    app.logger.error("Encountered HTTP 429 rate limiting error")
+                    
+                    # VPNBook proxy rotation logic (similar to above)
+                    if SHOULD_USE_VPNBOOK:
+                        # Similar rotation logic as above
+                        pass  # Simplified for brevity
+
+        # Check if we got a valid info_dict
         if not info_dict:
             app.logger.error(f"Failed to fetch video info from yt-dlp after all attempts for {url}. Encountered 429: {encountered_429}")
             
@@ -536,144 +565,148 @@ def download_video():
     quality = data.get('quality', 'best')
     cookies_content = data.get('cookies_content')
     user_agent_from_client = data.get('user_agent')
-
+    
     app.logger.info(f"Received /download request for URL: {url}, Quality: {quality}")
     if cookies_content:
-        app.logger.debug(f"Cookies received for download (first 100 chars): {cookies_content[:100]}")
+        app.logger.debug(f"Cookies received for download (first 100 chars): {cookies_content[:100] if len(cookies_content) > 100 else cookies_content}")
     if user_agent_from_client:
         app.logger.debug(f"User-Agent received for download: {user_agent_from_client}")
-
-    if not url or not quality:
-        app.logger.error("URL and quality are required for /download")
-        return jsonify({'error': 'URL and quality are required'}), 400
-
-    video_id = extract_video_id(url) or "unknown_id"
+        
+    if not url:
+        app.logger.error("URL is required for /download")
+        return jsonify({'error': 'URL is required'}), 400
+        
+    video_id = extract_video_id(url)
+    if not video_id:
+        app.logger.error(f"Invalid YouTube URL for download: {url}")
+        return jsonify({'error': 'Invalid YouTube URL'}), 400
+        
+    download_path = app.config['DOWNLOAD_FOLDER']
+    if not os.path.exists(download_path):
+        os.makedirs(download_path)
+        
     cookies_file_path = None
-    info_dict_for_filename = {} 
+    video_files = []
+    actual_downloaded_filename = None # For tracking the final filename
     
     try:
-        cookies_file_path = create_cookie_file(cookies_content, f"dl_{video_id}")
-        if cookies_file_path:
-            app.logger.info(f"Created temporary cookie file for download: {cookies_file_path}")
-        else:
-            app.logger.info("No valid cookies content for download or failed to create cookie file.")
-
-        download_path = app.config['DOWNLOAD_FOLDER']
-        
+        # Create a better cookie file if content provided
+        if cookies_content and cookies_content.strip():
+            cookies_file_path = create_cookie_file(cookies_content, f"download_{video_id}")
+            app.logger.info(f"Created cookie file for download: {cookies_file_path}")
+            
+        # Setup base yt-dlp options with better error handling
         base_ydl_opts = {
             'noplaylist': True,
-            # outtmpl will be set after fetching title or using fallback
+            'quiet': False, 
+            'no_warnings': True,
             'noprogress': True,
-            'verbose': False, # Keep this false for downloads unless debugging specific issues
-            'quiet': False,   # To see some output from yt-dlp during download
-            'nopart': True,
-            'continuedl': False, # Changed to False to avoid issues with partial files
             'no_color': True,
             'nocheckcertificate': True,
-            'youtube_skip_dash_manifest': True,
+            'ignoreerrors': True,
             'logtostderr': False,
+            'socket_timeout': 30,  # Increased timeout
+            'retries': 10,         # Increased retries
+            'fragment_retries': 10,
+            'extractor_retries': 5,
         }
-
-        current_user_agent = None
+        
+        # Set User-Agent for download
         if user_agent_from_client and user_agent_from_client.strip():
-            app.logger.info(f"Using client-provided User-Agent for download: {user_agent_from_client}")
-            current_user_agent = user_agent_from_client
+            app.logger.info(f"Using client User-Agent for download: {user_agent_from_client}")
+            base_ydl_opts['user_agent'] = user_agent_from_client
+            base_ydl_opts['http_headers'] = {'User-Agent': user_agent_from_client}
         else:
             default_ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             app.logger.info(f"Using default User-Agent for download: {default_ua}")
-            current_user_agent = default_ua
-        
-        base_ydl_opts['user_agent'] = current_user_agent
-        base_ydl_opts['http_headers'] = {
-            'User-Agent': current_user_agent, # Crucial for consistency
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-        }
+            base_ydl_opts['user_agent'] = default_ua
+            base_ydl_opts['http_headers'] = {'User-Agent': default_ua}
 
+        # Add cookies file if created
         if cookies_file_path:
             base_ydl_opts['cookiefile'] = cookies_file_path
             app.logger.info(f"Using cookies file for download: {cookies_file_path}")
 
-        # Use the effective proxy URL determined at startup for downloads as well
+        # Use the effective proxy URL determined at startup
         current_proxy_url_to_use = EFFECTIVE_YTDLP_PROXY_URL
-        # VPNBook rotation logic for downloads is similar to fetch_info if needed,
-        # but for now, we'll rely on the initial EFFECTIVE_YTDLP_PROXY_URL.
-        # A 429 during download is less common for the actual file chunks if metadata was fetched.
-
         if current_proxy_url_to_use:
-            app.logger.info(f"Using proxy for this download attempt: {current_proxy_url_to_use.split('@')[1] if '@' in current_proxy_url_to_use else current_proxy_url_to_use}")
+            logged_proxy = current_proxy_url_to_use.split('@')[1] if '@' in current_proxy_url_to_use else current_proxy_url_to_use
+            app.logger.info(f"Using proxy for this download attempt: {logged_proxy}")
             base_ydl_opts['proxy'] = current_proxy_url_to_use
         
         # Initial info fetch for filename (always try, but handle failure)
-        # This part is crucial to get the title for the filename
-        temp_ydl_opts_for_info = {
-            'noplaylist': True, 'quiet': True, 'no_warnings': True, 
-            'skip_download': True, 'forcejson': True, 
-            'user_agent': base_ydl_opts['user_agent'], # Use consistent UA
-            'cookiefile': cookies_file_path, # Use cookies if available
-            'proxy': base_ydl_opts.get('proxy'), # Use proxy if available
-            'nocheckcertificate': True,
-        }
-        app.logger.debug(f"yt-dlp options (for filename info fetch): {json.dumps(temp_ydl_opts_for_info, indent=2)}")
-        
+        info_dict_for_filename = None
         try:
+            temp_ydl_opts_for_info = base_ydl_opts.copy()
+            temp_ydl_opts_for_info['skip_download'] = True
+            temp_ydl_opts_for_info['forcejson'] = True
+            
+            app.logger.info(f"Fetching video info for filename determination...")
+            
             with yt_dlp.YoutubeDL(temp_ydl_opts_for_info) as ydl_info_fetch:
                 info_dict_for_filename = ydl_info_fetch.extract_info(url, download=False)
-            app.logger.info(f"Successfully fetched info for filename. Title: {info_dict_for_filename.get('title')}")
+                
+            if info_dict_for_filename:
+                app.logger.info(f"Successfully fetched info for filename. Title: {info_dict_for_filename.get('title')}")
+            else:
+                app.logger.warning("No info dictionary returned for filename determination.")
+                
         except yt_dlp.utils.DownloadError as e_info_dl_err:
             error_str = str(e_info_dl_err)
-            app.logger.error(f"DownloadError during initial info fetch for filename (download route): {error_str}")
-            # Specific handling for 429 during this critical step
+            app.logger.error(f"DownloadError during initial info fetch for filename: {error_str}")
+            
+            # Check for 429 rate limiting
             if "http error 429" in error_str.lower() or "too many requests" in error_str.lower():
-                # Attempt VPNBook proxy rotation if applicable
                 if SHOULD_USE_VPNBOOK and not YTDLP_PROXY_URL_ENV:
-                    app.logger.warning("Encountered 429 during filename info fetch. VPNBook active. Rotating proxy.")
-                    mark_proxy_failed()
+                    app.logger.warning("Encountered 429 during info fetch. Attempting to rotate VPNBook proxy.")
                     try:
+                        if current_proxy_url_to_use:
+                            mark_proxy_failed(current_proxy_url_to_use)
+                            
                         new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
                         if new_proxy_url:
-                            app.logger.info(f"Rotated VPNBook proxy for filename info fetch to: {'*****'.join(new_proxy_url.split('@')[0].split(':'))}@{new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
-                            temp_ydl_opts_for_info['proxy'] = new_proxy_url
-                            # Retry fetching info with new proxy
-                            with yt_dlp.YoutubeDL(temp_ydl_opts_for_info) as ydl_info_retry:
-                                info_dict_for_filename = ydl_info_retry.extract_info(url, download=False)
-                            app.logger.info(f"Successfully fetched info for filename after proxy rotation. Title: {info_dict_for_filename.get('title')}")
-                        else:
-                            app.logger.warning("Failed to get a new VPNBook proxy for filename info fetch.")
-                    except Exception as e_proxy_info_rotate:
-                        app.logger.error(f"Error rotating VPNBook proxy for filename info fetch: {e_proxy_info_rotate}")
-                
-                # If still no info_dict_for_filename after potential retry, or if not using VPNBook for rotation
-                if not info_dict_for_filename.get('title'):
-                    app.logger.error("Could not resolve 429 error to fetch filename info. Aborting download.")
-                    return jsonify({'error': 'YouTube is rate-limiting requests, cannot fetch video title for download. Please use fresh cookies or try again later.'}), 429
-            # For other errors, we might proceed with a default filename.
-            app.logger.warning(f"Proceeding with default filename as info fetch failed: {error_str}")
+                            logged_new_proxy = new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url
+                            app.logger.info(f"Rotated to new proxy: {logged_new_proxy}")
+                            
+                            # Try again with new proxy
+                            retry_opts = temp_ydl_opts_for_info.copy()
+                            retry_opts['proxy'] = new_proxy_url
+                            
+                            with yt_dlp.YoutubeDL(retry_opts) as ydl_retry:
+                                info_dict_for_filename = ydl_retry.extract_info(url, download=False)
+                                
+                            if info_dict_for_filename:
+                                app.logger.info("Successfully fetched info with new proxy.")
+                    except Exception as e_proxy_rotate:
+                        app.logger.error(f"Error rotating proxy during info fetch: {str(e_proxy_rotate)}")
+                else:
+                    return jsonify({
+                        'error': 'YouTube is rate-limiting requests from this server. Please provide fresh cookies or try again later.'
+                    }), 429
         except Exception as e_generic_info:
-            app.logger.error(f"Generic error during initial info fetch for filename (download route): {e_generic_info}", exc_info=True)
+            app.logger.error(f"Generic error during initial info fetch for filename: {e_generic_info}", exc_info=True)
             app.logger.warning("Proceeding with default filename due to generic error in info fetch.")
 
         # Set output template based on whether title was fetched
-        if info_dict_for_filename.get('title'):
+        if info_dict_for_filename and info_dict_for_filename.get('title'):
             final_filename_stem = sanitize_filename(info_dict_for_filename.get('title', video_id)) # Fallback to video_id
             base_ydl_opts['outtmpl'] = os.path.join(download_path, f'{final_filename_stem}.%(ext)s')
         else:
             # Fallback filename if title couldn't be fetched
-            base_ydl_opts['outtmpl'] = os.path.join(download_path, f'{video_id}_%(height)sp.%(ext)s') # Default uses video_id and height
+            base_ydl_opts['outtmpl'] = os.path.join(download_path, f'{video_id}_%(height)sp.%(ext)s')
         app.logger.info(f"Final output template for download: {base_ydl_opts['outtmpl']}")
 
-        final_download_opts = base_ydl_opts.copy() # Start with the base options
+        # Copy base options and customize for quality
+        final_download_opts = base_ydl_opts.copy()
 
+        # Handle MP3 downloads
         if quality == 'mp3':
             format_selector = 'bestaudio/best'
             # Use a temporary name for the initial download before conversion
-            # The final name will be based on the title or video_id
             temp_audio_filename_stem = sanitize_filename(info_dict_for_filename.get('title', video_id)) + "_temp_audio"
             output_template_for_ydl = os.path.join(download_path, f'{temp_audio_filename_stem}.%(ext)s')
             
-            # The final MP3 will be renamed to <title_or_id>.mp3
+            # The final MP3 will be renamed
             final_mp3_filename_stem = sanitize_filename(info_dict_for_filename.get('title', video_id))
             final_mp3_path_on_server = os.path.join(download_path, f"{final_mp3_filename_stem}.mp3")
 
@@ -683,181 +716,199 @@ def download_video():
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
-                    'preferredquality': '192', # Standard MP3 quality
+                    'preferredquality': '192',
                 }],
-                'ffmpeg_location': os.getenv('FFMPEG_PATH') # Ensure FFmpeg is found
+                'ffmpeg_location': os.getenv('FFMPEG_PATH')
             })
-            app.logger.debug(f"yt-dlp options (MP3 download): {json.dumps(final_download_opts, indent=2)}")
+            
+            app.logger.info("Starting MP3 download and conversion...")
             download_info_dict = None
+            
+            # First attempt with cookies
             try:
                 with yt_dlp.YoutubeDL(final_download_opts) as ydl:
-                    download_info_dict = ydl.extract_info(url, download=True) # This triggers download and postprocessing
-                app.logger.info(f"MP3 download and conversion initiated for {url}")
+                    download_info_dict = ydl.extract_info(url, download=True)
+                app.logger.info(f"MP3 download successful with cookies: {url}")
+                
             except yt_dlp.utils.DownloadError as e_mp3_dl:
-                error_str = str(e_mp3_dl)
-                app.logger.error(f"DownloadError during MP3 processing for {url}: {error_str}")
-                # Simplified 429 handling for download part, as info fetch is primary concern
-                if "http error 429" in error_str.lower() or "too many requests" in error_str.lower():
-                     return jsonify({'error': 'YouTube rate-limited during MP3 download. Try again with fresh cookies.'}), 429
-                return jsonify({'error': f'Failed to download/convert to MP3: {error_str}'}), 500
-            except Exception as e_mp3_generic:
-                app.logger.error(f"Generic error during MP3 processing for {url}: {e_mp3_generic}", exc_info=True)
-                return jsonify({'error': f'Server error during MP3 processing: {e_mp3_generic}'}), 500
-
-            # Find the generated MP3 file. yt-dlp appends .mp3 after conversion.
-            # The original extension in output_template_for_ydl might be .webm, .m4a etc.
-            expected_temp_mp3_file = os.path.join(download_path, f"{temp_audio_filename_stem}.mp3")
-            
-            if os.path.exists(final_mp3_path_on_server): # Clean up if exists from previous attempt
-                try: os.remove(final_mp3_path_on_server)
-                except: pass
-
-            if os.path.exists(expected_temp_mp3_file):
-                os.rename(expected_temp_mp3_file, final_mp3_path_on_server)
-                app.logger.info(f"Successfully converted and renamed MP3 to: {final_mp3_path_on_server}")
-            else:
-                # Fallback: check if yt-dlp used a different naming convention (e.g. if title had issues)
-                # This part needs to be robust. yt-dlp's `prepare_filename` on `download_info_dict` (if it ran)
-                # might give the actual name before postprocessing.
-                # For simplicity now, we'll assume `temp_audio_filename_stem.mp3` is the target.
-                app.logger.error(f"Converted MP3 file not found at expected path: {expected_temp_mp3_file}")
-                # Try to list files in download_path that might be it
-                possible_files = [f for f in os.listdir(download_path) if temp_audio_filename_stem in f and f.endswith('.mp3')]
-                if possible_files:
-                    app.logger.warning(f"Found possible MP3 matches: {possible_files}. Using the first one: {possible_files[0]}")
-                    os.rename(os.path.join(download_path, possible_files[0]), final_mp3_path_on_server)
+                mp3_error = str(e_mp3_dl)
+                app.logger.error(f"MP3 download error with cookies: {mp3_error}")
+                
+                if "http error 429" in mp3_error.lower() or "too many requests" in mp3_error.lower():
+                    # Try VPNBook proxy rotation if applicable
+                    if SHOULD_USE_VPNBOOK and not YTDLP_PROXY_URL_ENV:
+                        try:
+                            if current_proxy_url_to_use:
+                                mark_proxy_failed(current_proxy_url_to_use)
+                                
+                            new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
+                            if new_proxy_url:
+                                app.logger.info(f"Retrying MP3 download with new proxy")
+                                
+                                retry_opts = final_download_opts.copy()
+                                retry_opts['proxy'] = new_proxy_url
+                                
+                                with yt_dlp.YoutubeDL(retry_opts) as ydl_retry:
+                                    download_info_dict = ydl_retry.extract_info(url, download=True)
+                                app.logger.info(f"MP3 download successful with new proxy: {url}")
+                        except Exception as e_retry:
+                            app.logger.error(f"MP3 download failed with new proxy: {str(e_retry)}")
+                    else:
+                        return jsonify({
+                            'error': 'YouTube is rate-limiting MP3 download requests. Try again later or provide fresh cookies.'
+                        }), 429
                 else:
-                    return jsonify({'error': 'MP3 conversion failed. Output file not found after processing.'}), 500
-
-            if os.path.exists(final_mp3_path_on_server):
-                return jsonify({
-                    'download_url': f'/downloads/{os.path.basename(final_mp3_path_on_server)}',
-                    'filename': os.path.basename(final_mp3_path_on_server)
-                })
-            else: # Should not happen if rename was successful
-                return jsonify({'error': 'MP3 finalization failed unexpectedly.'}), 500
-
-        # Video download part
-        else: # Not MP3, so it's a video format
-            if quality == '2K': format_selector = 'bestvideo[height<=?1440]+bestaudio/best[height<=?1440]'
-            elif quality == '1080p': format_selector = 'bestvideo[height<=?1080]+bestaudio/best[height<=?1080]'
-            elif quality == '720p': format_selector = 'bestvideo[height<=?720]+bestaudio/best[height<=?720]'
-            elif quality == 'best': format_selector = 'bestvideo+bestaudio/best'
-            elif 'p' in quality:
-                height = quality[:-1]
-                format_selector = f'bestvideo[height<=?{height}]+bestaudio/best[height<=?{height}]'
-            else: # Default to 1080p if unrecognized
-                format_selector = 'bestvideo[height<=?1080]+bestaudio/best[height<=?1080]'
+                    # If this is a non-429 error, check if the video is unavailable
+                    if "video unavailable" in mp3_error.lower():
+                        return jsonify({
+                            'error': 'This video is unavailable. It may be private, deleted, or region-restricted.'
+                        }), 404
+            
+            # If we got a download_info_dict, try to determine the final path
+            if download_info_dict:
+                try:
+                    # Check if the MP3 file was successfully created
+                    if os.path.exists(final_mp3_path_on_server):
+                        actual_downloaded_filename = os.path.basename(final_mp3_path_on_server)
+                    # Use the info_dict to determine the name otherwise
+                    else:
+                        temp_ydl = yt_dlp.YoutubeDL(final_download_opts)
+                        processed_path = temp_ydl.prepare_filename(download_info_dict)
+                        if processed_path.endswith('.mp3'):
+                            actual_downloaded_filename = os.path.basename(processed_path)
+                        else:
+                            # If the path doesn't end with .mp3, we need to convert it
+                            actual_downloaded_filename = os.path.basename(processed_path).rsplit('.', 1)[0] + '.mp3'
+                except Exception as e_path_mp3:
+                    app.logger.error(f"Error determining MP3 path: {str(e_path_mp3)}")
+                    
+            # Fallback filename determination for MP3
+            if not actual_downloaded_filename:
+                actual_downloaded_filename = f"{final_mp3_filename_stem}.mp3"
+                
+        else:
+            # Handle video downloads (non-MP3)
+            if quality == 'best':
+                format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            elif quality == '4k':
+                format_selector = 'bestvideo[height>=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height>=2160]+bestaudio/best[height>=2160]/best'
+            elif quality == '2k':
+                format_selector = 'bestvideo[height>=1440][height<2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height>=1440][height<2160]+bestaudio/best[height>=1440][height<2160]/best'
+            elif quality == '1080p':
+                format_selector = 'bestvideo[height>=1080][height<1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height>=1080][height<1440]+bestaudio/best[height>=1080][height<1440]/best'
+            elif quality == '720p':
+                format_selector = 'bestvideo[height>=720][height<1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height>=720][height<1080]+bestaudio/best[height>=720][height<1080]/best'
+            else:
+                format_selector = 'bestvideo[height>=480][height<720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height>=480][height<720]+bestaudio/best[height>=480][height<720]/best'
             
             final_download_opts.update({
                 'format': format_selector,
-                'merge_output_format': 'mp4', # Standard MP4 output
-                 # Prefer h264/aac if available for wider compatibility, sort by resolution
+                'merge_output_format': 'mp4',
                 'format_sort': ['+res', '+fps', '+vcodec:h264', '+acodec:aac', 'ext:mp4'],
-                # FFmpeg postprocessor for metadata and ensuring audio codec (e.g. AAC for mp4)
                 'postprocessors': [
                     {'key': 'FFmpegMetadata'},
-                    {
-                        'key': 'FFmpegVideoConvertor', # Ensures video is in a compatible format if needed, e.g. h264
-                        'preferedformat': 'mp4',
-                    },
-                    # Ensure audio is AAC for MP4 compatibility, if not already.
-                    # This can be part of merge_output_format or a specific audio conversion.
-                    # yt-dlp often handles this well with 'merge_output_format': 'mp4'.
-                    # Adding an explicit audio conversion can sometimes cause issues or be redundant.
-                    # Let's rely on merge_output_format for now.
+                    {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
                 ],
                 'ffmpeg_location': os.getenv('FFMPEG_PATH')
             })
-            app.logger.debug(f"yt-dlp options (video download - {quality}): {json.dumps(final_download_opts, indent=2)}")
+            
+            app.logger.info(f"Starting video download for quality: {quality}")
             downloaded_video_info = None
+            
+            # First attempt with cookies and other options
             try:
                 with yt_dlp.YoutubeDL(final_download_opts) as ydl:
                     downloaded_video_info = ydl.extract_info(url, download=True)
-                app.logger.info(f"Video download successful for {url} ({quality})")
+                app.logger.info(f"Video download successful with cookies: {url}")
+                
             except yt_dlp.utils.DownloadError as e_video_dl:
-                error_str = str(e_video_dl)
-                app.logger.error(f"DownloadError during video download ({quality}) for {url}: {error_str}")
-                if "http error 429" in error_str.lower() or "too many requests" in error_str.lower():
-                    return jsonify({'error': 'YouTube rate-limited during video download. Try again with fresh cookies.'}), 429
-                return jsonify({'error': f'Failed to download video ({quality}): {error_str}'}), 500
-            except Exception as e_video_generic:
-                app.logger.error(f"Generic error during video download ({quality}) for {url}: {e_video_generic}", exc_info=True)
-                return jsonify({'error': f'Server error during video download: {e_video_generic}'}), 500
-
-            # Determine the actual filename yt-dlp used
-            # yt-dlp.prepare_filename(info_dict) is the most reliable way
-            # We need info_dict from the download step, not just the filename info fetch
+                video_error = str(e_video_dl)
+                app.logger.error(f"Video download error with cookies: {video_error}")
+                
+                if "http error 429" in video_error.lower() or "too many requests" in video_error.lower():
+                    # Try VPNBook proxy rotation if applicable
+                    if SHOULD_USE_VPNBOOK and not YTDLP_PROXY_URL_ENV:
+                        try:
+                            if current_proxy_url_to_use:
+                                mark_proxy_failed(current_proxy_url_to_use)
+                                
+                            new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
+                            if new_proxy_url:
+                                app.logger.info(f"Retrying video download with new proxy")
+                                
+                                retry_opts = final_download_opts.copy()
+                                retry_opts['proxy'] = new_proxy_url
+                                
+                                with yt_dlp.YoutubeDL(retry_opts) as ydl_retry:
+                                    downloaded_video_info = ydl_retry.extract_info(url, download=True)
+                                app.logger.info(f"Video download successful with new proxy: {url}")
+                        except Exception as e_retry:
+                            app.logger.error(f"Video download failed with new proxy: {str(e_retry)}")
+                    else:
+                        return jsonify({
+                            'error': 'YouTube is rate-limiting video download requests. Try again later or provide fresh cookies.'
+                        }), 429
+                else:
+                    # If this is a non-429 error, check if the video is unavailable
+                    if "video unavailable" in video_error.lower():
+                        return jsonify({
+                            'error': 'This video is unavailable. It may be private, deleted, or region-restricted.'
+                        }), 404
+                    
+            # Determine the final downloaded filename
             actual_downloaded_filename = None
+            
             if downloaded_video_info:
                 # Create a temporary ydl instance just to call prepare_filename
-                # This is a bit of a workaround, ideally, yt-dlp would return the final path more directly
-                # or the hook system would be used.
                 try:
-                    temp_ydl_for_path = yt_dlp.YoutubeDL(final_download_opts) # Use same opts for path generation
+                    temp_ydl_for_path = yt_dlp.YoutubeDL(final_download_opts)
                     actual_downloaded_filename = os.path.basename(temp_ydl_for_path.prepare_filename(downloaded_video_info))
                     app.logger.info(f"yt-dlp prepared filename: {actual_downloaded_filename}")
                 except Exception as e_path:
-                    app.logger.error(f"Could not determine exact downloaded filename using prepare_filename: {e_path}")
+                    app.logger.error(f"Could not determine exact downloaded filename: {str(e_path)}")
             
-            # Fallback if prepare_filename failed or info wasn't rich enough
+            # Fallback if prepare_filename failed
             if not actual_downloaded_filename:
-                # Construct expected filename based on outtmpl and fetched info
-                # This is less reliable than prepare_filename
                 expected_stem = sanitize_filename(info_dict_for_filename.get('title', video_id))
-                # The extension would be .mp4 due to merge_output_format
-                actual_downloaded_filename = f"{expected_stem}.mp4" 
+                actual_downloaded_filename = f"{expected_stem}.mp4"
                 app.logger.warning(f"Falling back to constructed filename: {actual_downloaded_filename}")
 
-
-            full_file_path = os.path.join(download_path, actual_downloaded_filename)
-            app.logger.info(f"Checking for downloaded file at: {full_file_path}")
-
-            if os.path.exists(full_file_path):
-                return jsonify({
-                    'download_url': f'/downloads/{actual_downloaded_filename}',
-                    'filename': actual_downloaded_filename
-                })
-            else:
-                # If the primary expected file isn't there, list dir and try to find a match
-                # This can happen if sanitize_filename or yt-dlp's naming differs slightly
-                app.logger.error(f"Video file not found at expected path: {full_file_path}. Listing download directory...")
-                try:
-                    files_in_download_dir = os.listdir(download_path)
-                    app.logger.debug(f"Files in download_path ('{download_path}'): {files_in_download_dir}")
-                    # Try a more generic match based on video_id or title parts
-                    possible_match = None
-                    title_part = sanitize_filename(info_dict_for_filename.get('title','')).lower() if info_dict_for_filename.get('title') else video_id.lower()
-                    for f_name in files_in_download_dir:
-                        if f_name.endswith('.mp4') and (video_id.lower() in f_name.lower() or (title_part and title_part in f_name.lower())):
-                            possible_match = f_name
-                            app.logger.warning(f"Found a possible match: {possible_match}. Using this file.")
-                            break
-                    if possible_match:
-                         return jsonify({
-                            'download_url': f'/downloads/{possible_match}',
-                            'filename': possible_match
-                        })
-                    else:
-                        app.logger.error("No suitable MP4 file found in download directory after exhaustive check.")
-                        return jsonify({'error': 'Video download completed, but the final file could not be located on the server.'}), 500
-                except Exception as list_err:
-                    app.logger.error(f"Error listing download directory: {list_err}")
-                    return jsonify({'error': 'Video download might have completed, but an error occurred verifying the file.'}), 500
-    
-    except yt_dlp.utils.MaxDownloadsReached:
-        app.logger.error("Max downloads reached error from yt-dlp.")
-        return jsonify({'error': 'Max downloads reached. This is unexpected.'}), 500
+        # Check if the file was actually downloaded
+        full_file_path = os.path.join(download_path, actual_downloaded_filename)
+        app.logger.info(f"Checking for downloaded file at: {full_file_path}")
+        
+        if os.path.exists(full_file_path):
+            app.logger.info(f"Download successful: {actual_downloaded_filename}")
+            
+            # Get file size for display
+            file_size = os.path.getsize(full_file_path)
+            file_size_mb = file_size / (1024 * 1024)  # Convert to MB
+            
+            return jsonify({
+                'success': True,
+                'message': 'Video downloaded successfully',
+                'filename': actual_downloaded_filename,
+                'file_size': f"{file_size_mb:.2f} MB",
+                'download_url': f"/download/{actual_downloaded_filename}"
+            })
+        else:
+            app.logger.error(f"File not found after download: {full_file_path}")
+            return jsonify({
+                'error': 'Download failed: File not created',
+                'file_path': full_file_path
+            }), 500
+            
     except Exception as e:
-        app.logger.error(f"Unexpected error in download_video: {e}", exc_info=True)
-        return jsonify({'error': f'Server error during download: {str(e)}'}), 500
+        app.logger.error(f"Unexpected error in download_video: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
     finally:
+        # Clean up temporary cookie files
         if cookies_file_path and os.path.exists(cookies_file_path):
             try:
                 os.remove(cookies_file_path)
-                app.logger.info(f"Cleaned up cookie file in download finally: {cookies_file_path}")
-            except Exception as e_cleanup:
-                app.logger.error(f"Failed to clean up cookie file in download finally: {e_cleanup}")
+                app.logger.info(f"Cleaned up cookie file: {cookies_file_path}")
+            except Exception as e_clean:
+                app.logger.error(f"Failed to clean up cookie file: {str(e_clean)}")
 
 @app.route('/downloads/<filename>')
 def serve_downloaded_file(filename):

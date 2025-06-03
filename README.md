@@ -11,6 +11,9 @@ A robust YouTube video downloader application built with Flask and yt-dlp, desig
 - Support for cookies to access age-restricted or private content
 - User-Agent customization for improved success rates
 - VPNBook proxy integration for bypassing geo-restrictions
+- **NEW**: Improved error handling with proper HTTP status codes
+- **NEW**: Enhanced browser cookie handling
+- **NEW**: Smart retries with network timeout settings
 
 ## Installation
 
@@ -99,6 +102,24 @@ Options:
 - `--output`: Output directory
 - `--demo`: Run with demo values
 
+#### NEW: Cookie Testing Tool
+
+```bash
+python test_cookies.py --url <video_url> --browser <browser_name> --test-all
+```
+
+Tests various cookie handling methods to find the best working approach:
+- Direct browser cookies
+- Cookie file
+- Fallback to no cookies
+
+Options:
+- `--url`: YouTube video URL to test
+- `--cookie-file`: Path to cookie file (optional)
+- `--browser`: Browser to get cookies from (chrome, firefox, edge, etc.)
+- `--user-agent`: User agent string to use
+- `--test-all`: Run all test methods
+
 ## Getting Cookies and User-Agent
 
 For best results when downloading restricted content:
@@ -116,6 +137,20 @@ For best results when downloading restricted content:
 
 **Important**: The User-Agent must match the browser used to export the cookies.
 
+## Error Handling
+
+The application now has improved error handling with proper HTTP status codes:
+
+- **HTTP 200**: Successful video info fetch or download
+- **HTTP 404**: Video is unavailable (provides specific reasons)
+- **HTTP 429**: Rate limiting detected
+- **HTTP 500**: Server error
+
+When a video is reported as unavailable, the app will now provide possible reasons:
+- The video may be private or deleted
+- The video may be geo-blocked
+- The video may require age verification
+
 ## Troubleshooting
 
 ### HTTP Error 429 (Too Many Requests)
@@ -132,6 +167,7 @@ If you encounter rate limiting:
 1. Verify the video exists and is publicly available
 2. Try using cookies from a logged-in account
 3. Ensure your IP/proxy isn't blocked by YouTube
+4. Check if the content is region-restricted
 
 ## License
 
