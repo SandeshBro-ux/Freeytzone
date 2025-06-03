@@ -408,13 +408,19 @@ def fetch_info():
             
             # Analyze the error message if available
             if hasattr(app, '_last_yt_dlp_error') and app._last_yt_dlp_error:
-                error_lower = app._last_yt_dlp_error.lower()
+                error_msg = app._last_yt_dlp_error
+                error_lower = error_msg.lower()
                 
-                # Check for all patterns that indicate unavailable content
+                app.logger.debug(f"Raw error from yt-dlp: {error_msg}")
+                
+                # CRITICAL: Check for unavailability phrases that exactly match YouTube's error messages
+                # This includes the specific pattern "This content isn't available"
                 video_unavailable_patterns = [
                     "video unavailable", 
                     "this video is unavailable",
-                    "this content isn't available",
+                    "this content isn't available",  # This specific phrase appears in your logs
+                    "content isn't available",  # Added shorter version
+                    "isn't available",  # Added even shorter version
                     "content unavailable",
                     "not available in your country",
                     "has been removed",
@@ -423,7 +429,19 @@ def fetch_info():
                     "sign in to confirm your age"
                 ]
                 
-                is_unavailable = any(pattern in error_lower for pattern in video_unavailable_patterns)
+                # First detect exact phrases from YouTube
+                is_unavailable = False
+                matched_pattern = None
+                for pattern in video_unavailable_patterns:
+                    if pattern in error_lower:
+                        is_unavailable = True
+                        matched_pattern = pattern
+                        app.logger.debug(f"Matched unavailability pattern: '{pattern}'")
+                        break
+                
+                # Log the outcome of pattern matching
+                if is_unavailable:
+                    app.logger.info(f"Video {video_id} detected as unavailable. Matched pattern: '{matched_pattern}'")
                 
                 # Check if it's a rate limit error
                 if "http error 429" in error_lower or "too many requests" in error_lower:
@@ -432,7 +450,7 @@ def fetch_info():
                     last_error_msg = "YouTube is rate-limiting requests. Please try again later or provide fresh cookies."
                 
                 # Check if it's a geo-restriction error
-                is_geo_restricted, countries, geo_msg = extract_geo_restriction_info(app._last_yt_dlp_error)
+                is_geo_restricted, countries, geo_msg = extract_geo_restriction_info(error_msg)
                 if is_geo_restricted:
                     is_unavailable = True
                     if geo_msg:
@@ -446,7 +464,7 @@ def fetch_info():
                     elif not is_geo_restricted:  # Only use generic message if not geo-restricted
                         last_error_msg = "This video is not available. It may be private, deleted, age-restricted, or region-blocked."
                 
-                app.logger.info(f"Error analysis: status={error_status_code}, unavailable={is_unavailable}, geo_restricted={is_geo_restricted}")
+                app.logger.info(f"Error analysis complete: status={error_status_code}, unavailable={is_unavailable}, geo_restricted={is_geo_restricted}")
             
             if encountered_429:
                 return jsonify({
@@ -454,6 +472,9 @@ def fetch_info():
                     'error_code': 429
                 }), 429
             else:
+                # Log final response before sending
+                app.logger.debug(f"Sending response with status: {error_status_code}, message: {last_error_msg}")
+                
                 return jsonify({
                     'error': last_error_msg,
                     'video_id': video_id,
@@ -1247,7 +1268,7 @@ def debug_fetch():
         error_lower = error_str.lower()
         if "429" in error_lower:
             attempt_result['error_type'] = 'RATE_LIMIT'
-        elif any(pattern in error_lower for pattern in ["unavailable", "private", "removed"]):
+        elif any(pattern in error_lower for pattern in ["unavailable", "private", "removed", "isn't available"]):
             attempt_result['error_type'] = 'VIDEO_UNAVAILABLE' 
         elif "age" in error_lower or "confirm your age" in error_lower:
             attempt_result['error_type'] = 'AGE_RESTRICTED'
@@ -1308,7 +1329,7 @@ def debug_fetch():
                 error_lower = error_str.lower()
                 if "429" in error_lower:
                     attempt_result['error_type'] = 'RATE_LIMIT'
-                elif any(pattern in error_lower for pattern in ["unavailable", "private", "removed"]):
+                elif any(pattern in error_lower for pattern in ["unavailable", "private", "removed", "isn't available"]):
                     attempt_result['error_type'] = 'VIDEO_UNAVAILABLE' 
                 elif "age" in error_lower or "confirm your age" in error_lower:
                     attempt_result['error_type'] = 'AGE_RESTRICTED'
