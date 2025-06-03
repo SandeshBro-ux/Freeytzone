@@ -1,33 +1,18 @@
 # FreeYTZone - YouTube Video Downloader
 
-A web application for downloading YouTube videos with support for various quality options and automatic IP rotation to bypass rate limits.
+A robust YouTube video downloader application built with Flask and yt-dlp, designed to handle YouTube's rate limiting and content restrictions.
 
 ## Features
 
-- Clean, modern web interface
-- Support for downloading videos in multiple quality levels (up to 2K/4K)
-- MP3 audio extraction
-- VPNBook proxy integration for bypassing YouTube's rate limits (HTTP Error 429)
-- Proper cookie support for downloading age-restricted or private videos
-- Automatic retry with proxy rotation when encountering rate limits
-
-## Environment Variables
-
-Configure the application with the following environment variables:
-
-- `YOUTUBE_API_KEY` - YouTube Data API key for fetching video metadata
-- `YTDLP_PROXY_URL` - Custom proxy URL (overrides VPNBook if set)
-- `USE_VPNBOOK` - Enable/disable VPNBook proxy integration (default: "True")
-- `VPNBOOK_COUNTRY` - Country for VPNBook proxy (default: random, options: US, CA, DE, FR, UK, PL)
-- `VPNBOOK_PROTOCOL` - Protocol for VPNBook proxy (default: "http", options: "http", "socks")
+- Download YouTube videos in various qualities (up to 4K)
+- Download audio-only MP3 files
+- View video details (title, channel, subscribers, likes, views, etc.)
+- Multiple download methods to bypass YouTube restrictions
+- Support for cookies to access age-restricted or private content
+- User-Agent customization for improved success rates
+- VPNBook proxy integration for bypassing geo-restrictions
 
 ## Installation
-
-### Requirements
-- Python 3.8 or higher
-- FFmpeg (for video format conversion and audio extraction)
-
-### Setup
 
 1. Clone the repository:
 ```bash
@@ -40,10 +25,12 @@ cd Freeytzone
 pip install -r requirements.txt
 ```
 
-3. Create a `.env` file with your YouTube API key:
+3. Set up your environment variables by creating a `.env` file:
 ```
 YOUTUBE_API_KEY=your_youtube_api_key
 USE_VPNBOOK=True
+VPNBOOK_COUNTRY=US
+VPNBOOK_PROTOCOL=http
 ```
 
 4. Run the application:
@@ -51,43 +38,108 @@ USE_VPNBOOK=True
 python app.py
 ```
 
-## Deployment on Render
+The application will be available at http://localhost:5000
 
-This application is configured for easy deployment on Render.
+## Deployment
 
-1. Create a new Web Service on Render
-2. Connect your GitHub repository
-3. Configure environment variables in the Render dashboard
-4. Deploy!
+This application can be deployed on platforms like Render. When deploying:
 
-## VPNBook Proxy Integration
-
-The application integrates with VPNBook's free proxies to bypass YouTube's rate limits:
-
-- Automatically fetches the current VPNBook password
-- Rotates proxies when encountering rate limits
-- Tracks failed proxies to avoid using them again
-- Supports multiple countries (US, Canada, Germany, France, UK, Poland)
+1. Set the environment variables in your deployment platform
+2. Make sure FFmpeg is available in the deployment environment
+3. Configure the build command to install dependencies
 
 ## Usage
 
-1. Enter a YouTube video URL
-2. (Optional) Paste your YouTube cookies for age-restricted or private videos
-3. Click "Fetch Video Info" to analyze the video
-4. Select your desired quality
-5. Click "Download" to save the video
+### Web Interface
 
-## Handling Rate Limits
+1. Open the application in your browser
+2. Paste a YouTube URL in the input field
+3. Click "Get Info" to fetch video details
+4. Select your desired quality from the dropdown
+5. Click "Download" to start the download
 
-YouTube imposes rate limits (HTTP 429 errors) on frequent requests. This application:
+### For restricted content:
 
-1. Automatically retries with different VPNBook proxies
-2. Provides clear error messages when rate limits are encountered
-3. Allows using cookies to authenticate with YouTube and reduce rate limiting
+1. Paste your browser cookies in the "Cookies" textarea
+2. Paste your browser's User-Agent in the "User-Agent" textarea
+3. Follow the same steps as above
+
+### Command-line Tools
+
+The repository includes several command-line tools for direct downloading:
+
+#### Direct Download Script
+
+```bash
+python download_direct.py
+```
+
+This script attempts to download a hardcoded YouTube video using cookies but no proxy.
+
+#### Proxy Download Module
+
+```bash
+python proxy_download.py <youtube_url> [quality] [cookies_file]
+```
+
+This module provides functions to download videos with various methods, including VPNBook proxies.
+
+#### Download Tester
+
+```bash
+python download_tester.py --demo
+```
+
+Tests different download methods and compares their success rates.
+
+Options:
+- `--url`: YouTube video URL
+- `--quality`: Video quality (best, 1080p, 720p, mp3, etc.)
+- `--cookies`: Path to cookies file
+- `--output`: Output directory
+- `--demo`: Run with demo values
+
+## Getting Cookies and User-Agent
+
+For best results when downloading restricted content:
+
+1. **Cookies**:
+   - Install a cookie export extension in your browser
+   - Visit YouTube and log in
+   - Export cookies in Netscape format
+   - Paste the content in the application's cookie textarea
+
+2. **User-Agent**:
+   - Visit [whatsmyuseragent.org](https://whatsmyuseragent.org/)
+   - Copy your browser's User-Agent string
+   - Paste it in the application's User-Agent textarea
+
+**Important**: The User-Agent must match the browser used to export the cookies.
+
+## Troubleshooting
+
+### HTTP Error 429 (Too Many Requests)
+
+If you encounter rate limiting:
+
+1. Try using fresh cookies from a logged-in YouTube account
+2. Ensure the User-Agent matches the browser used for cookies
+3. Wait some time before retrying
+4. Try using the VPNBook proxy functionality
+
+### "Content Unavailable" Errors
+
+1. Verify the video exists and is publicly available
+2. Try using cookies from a logged-in account
+3. Ensure your IP/proxy isn't blocked by YouTube
 
 ## License
 
-MIT License
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Disclaimer
+
+This tool is for educational purposes only. Only download content that you have the right to download. Respect YouTube's Terms of Service and copyright laws.
 
 ## Project Structure
 
