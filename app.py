@@ -260,6 +260,7 @@ def fetch_info():
     cookies_file_path = None
     info_dict = None
     encountered_429 = False
+    app._last_yt_dlp_error = ""  # Initialize error tracking variable
 
     try:
         # Set up base options for yt-dlp
@@ -331,8 +332,6 @@ def fetch_info():
                     encountered_429 = True
                     app.logger.error("Encountered HTTP 429 rate limiting error")
                 
-                # Retry logic would be here for specific error types
-                
                 # If cookies don't work or get an error, try without cookies
                 app.logger.info(f"Attempting to fetch info for {url} WITHOUT cookies.")
                 try:
@@ -347,7 +346,7 @@ def fetch_info():
                 except yt_dlp.utils.DownloadError as e_no_cookie:
                     error_str_no_cookie = str(e_no_cookie)
                     app.logger.error(f"yt-dlp DownloadError WITHOUT cookies for {url}: {error_str_no_cookie}")
-                    app._last_yt_dlp_error = error_str_no_cookie
+                    app._last_yt_dlp_error = error_str_no_cookie  # Update the error message
                     
                     # VPNBook proxy rotation logic
                     if SHOULD_USE_VPNBOOK and ("429" in error_str_no_cookie or "too many requests" in error_str_no_cookie.lower()):
@@ -385,7 +384,7 @@ def fetch_info():
             except yt_dlp.utils.DownloadError as e_direct:
                 error_str_direct = str(e_direct)
                 app.logger.error(f"yt-dlp DownloadError for direct fetch of {url}: {error_str_direct}")
-                app._last_yt_dlp_error = error_str_direct
+                app._last_yt_dlp_error = error_str_direct  # Update the error message
                 
                 # Check for rate limiting
                 if "429" in error_str_direct or "too many requests" in error_str_direct.lower():
@@ -401,30 +400,65 @@ def fetch_info():
         if not info_dict:
             app.logger.error(f"Failed to fetch video info from yt-dlp after all attempts for {url}. Encountered 429: {encountered_429}")
             
-            # Capture last error message for more specific feedback
+            # Default error information
+            error_status_code = 500  
             last_error_msg = "The content may be unavailable, private, or an unknown yt-dlp error occurred."
+            is_unavailable = False
+            is_geo_restricted = False
             
-            # Check if the error contains "Video unavailable" which is a specific YouTube error
-            # This typically means the video is genuinely unavailable rather than an access issue
-            error_status_code = 500  # Default to server error
+            # Analyze the error message if available
             if hasattr(app, '_last_yt_dlp_error') and app._last_yt_dlp_error:
-                if "video unavailable" in app._last_yt_dlp_error.lower():
-                    last_error_msg = "This video is not available. It may be private, deleted, age-restricted, or region-blocked in our server's location."
-                    app.logger.warning(f"YouTube reports video {video_id} is unavailable. This is likely a genuine content restriction, not an error in our code.")
-                    error_status_code = 404  # Not found is more appropriate for unavailable content
-                elif "http error 429" in app._last_yt_dlp_error.lower() or "too many requests" in app._last_yt_dlp_error.lower():
+                error_lower = app._last_yt_dlp_error.lower()
+                
+                # Check for all patterns that indicate unavailable content
+                video_unavailable_patterns = [
+                    "video unavailable", 
+                    "this video is unavailable",
+                    "this content isn't available",
+                    "content unavailable",
+                    "not available in your country",
+                    "has been removed",
+                    "private video",
+                    "has been terminated",
+                    "sign in to confirm your age"
+                ]
+                
+                is_unavailable = any(pattern in error_lower for pattern in video_unavailable_patterns)
+                
+                # Check if it's a rate limit error
+                if "http error 429" in error_lower or "too many requests" in error_lower:
                     encountered_429 = True
                     error_status_code = 429
+                    last_error_msg = "YouTube is rate-limiting requests. Please try again later or provide fresh cookies."
+                
+                # Check if it's a geo-restriction error
+                is_geo_restricted, countries, geo_msg = extract_geo_restriction_info(app._last_yt_dlp_error)
+                if is_geo_restricted:
+                    is_unavailable = True
+                    if geo_msg:
+                        last_error_msg = geo_msg
+                
+                # If it's an unavailability error, set appropriate status and message
+                if is_unavailable:
+                    error_status_code = 404  # Not found for unavailable content
+                    if "age" in error_lower or "confirm your age" in error_lower:
+                        last_error_msg = "This video requires age verification. Please provide logged-in cookies to access it."
+                    elif not is_geo_restricted:  # Only use generic message if not geo-restricted
+                        last_error_msg = "This video is not available. It may be private, deleted, age-restricted, or region-blocked."
+                
+                app.logger.info(f"Error analysis: status={error_status_code}, unavailable={is_unavailable}, geo_restricted={is_geo_restricted}")
             
             if encountered_429:
                 return jsonify({
-                    'error': 'YouTube is rate-limiting requests from this server. Please provide fresh cookies or try again much later. Using a different User-Agent might also help.'
+                    'error': 'YouTube is rate-limiting requests from this server. Please provide fresh cookies or try again later. Using a different User-Agent might also help.',
+                    'error_code': 429
                 }), 429
             else:
                 return jsonify({
-                    'error': f'Failed to fetch video info from yt-dlp: {last_error_msg}',
+                    'error': last_error_msg,
                     'video_id': video_id,
-                    'is_unavailable': "video unavailable" in app._last_yt_dlp_error.lower() if hasattr(app, '_last_yt_dlp_error') else False
+                    'is_unavailable': is_unavailable,
+                    'error_code': error_status_code
                 }), error_status_code
 
         app.logger.info(f"Successfully fetched info_dict for {url}. Title: {info_dict.get('title')}")
@@ -754,12 +788,40 @@ def download_video():
                         except Exception as e_retry:
                             app.logger.error(f"MP3 download failed with new proxy: {str(e_retry)}")
                     else:
-                        return jsonify({
-                            'error': 'YouTube is rate-limiting MP3 download requests. Try again later or provide fresh cookies.'
-                        }), 429
+                        # If this is a non-429 error, check if the video is unavailable
+                        error_lower = mp3_error.lower()
+                        video_unavailable_patterns = [
+                            "video unavailable", 
+                            "this video is unavailable",
+                            "this content isn't available",
+                            "content unavailable",
+                            "not available in your country",
+                            "has been removed",
+                            "private video",
+                            "has been terminated"
+                        ]
+                        
+                        if any(pattern in error_lower for pattern in video_unavailable_patterns):
+                            app.logger.warning(f"YouTube reports video {video_id} is unavailable. Message: '{mp3_error}'")
+                            return jsonify({
+                                'error': 'This video is unavailable. It may be private, deleted, or region-restricted.'
+                            }), 404
                 else:
                     # If this is a non-429 error, check if the video is unavailable
-                    if "video unavailable" in mp3_error.lower():
+                    error_lower = mp3_error.lower()
+                    video_unavailable_patterns = [
+                        "video unavailable", 
+                        "this video is unavailable",
+                        "this content isn't available",
+                        "content unavailable",
+                        "not available in your country",
+                        "has been removed",
+                        "private video",
+                        "has been terminated"
+                    ]
+                    
+                    if any(pattern in error_lower for pattern in video_unavailable_patterns):
+                        app.logger.warning(f"YouTube reports video {video_id} is unavailable. Message: '{mp3_error}'")
                         return jsonify({
                             'error': 'This video is unavailable. It may be private, deleted, or region-restricted.'
                         }), 404
@@ -845,16 +907,44 @@ def download_video():
                         except Exception as e_retry:
                             app.logger.error(f"Video download failed with new proxy: {str(e_retry)}")
                     else:
-                        return jsonify({
-                            'error': 'YouTube is rate-limiting video download requests. Try again later or provide fresh cookies.'
-                        }), 429
+                        # If this is a non-429 error, check if the video is unavailable
+                        error_lower = video_error.lower()
+                        video_unavailable_patterns = [
+                            "video unavailable", 
+                            "this video is unavailable",
+                            "this content isn't available",
+                            "content unavailable",
+                            "not available in your country",
+                            "has been removed",
+                            "private video",
+                            "has been terminated"
+                        ]
+                        
+                        if any(pattern in error_lower for pattern in video_unavailable_patterns):
+                            app.logger.warning(f"YouTube reports video {video_id} is unavailable. Message: '{video_error}'")
+                            return jsonify({
+                                'error': 'This video is unavailable. It may be private, deleted, or region-restricted.'
+                            }), 404
                 else:
                     # If this is a non-429 error, check if the video is unavailable
-                    if "video unavailable" in video_error.lower():
+                    error_lower = video_error.lower()
+                    video_unavailable_patterns = [
+                        "video unavailable", 
+                        "this video is unavailable",
+                        "this content isn't available",
+                        "content unavailable",
+                        "not available in your country",
+                        "has been removed",
+                        "private video",
+                        "has been terminated"
+                    ]
+                    
+                    if any(pattern in error_lower for pattern in video_unavailable_patterns):
+                        app.logger.warning(f"YouTube reports video {video_id} is unavailable. Message: '{video_error}'")
                         return jsonify({
                             'error': 'This video is unavailable. It may be private, deleted, or region-restricted.'
                         }), 404
-                    
+            
             # Determine the final downloaded filename
             actual_downloaded_filename = None
             
@@ -1017,6 +1107,236 @@ def download_channel_logo(channel_id):
             return jsonify({'error': 'Could not download channel logo'}), 500
     except Exception as e:
         return jsonify({'error': f'Error: {str(e)}'}), 500
+
+def extract_geo_restriction_info(error_message):
+    """
+    Extract geo-restriction information from yt-dlp error messages
+    Returns a tuple of (is_geo_restricted, countries_list, detailed_message)
+    """
+    if not error_message:
+        return False, [], ""
+    
+    error_lower = error_message.lower()
+    
+    # Common patterns in geo-restriction messages
+    geo_patterns = [
+        "is not available in your country",
+        "video is available in the following countries",
+        "not available in your region",
+        "content is not available in your country",
+        "this video is not available in your country"
+    ]
+    
+    is_geo_restricted = any(pattern in error_lower for pattern in geo_patterns)
+    
+    if not is_geo_restricted:
+        return False, [], ""
+    
+    # Try to extract country list if available
+    countries = []
+    detailed_message = ""
+    
+    # Look for country codes like "video is available in the following countries: US, CA, UK"
+    country_list_match = re.search(r'available in the following countries?: ([\w, ]+)', error_message, re.IGNORECASE)
+    if country_list_match:
+        country_str = country_list_match.group(1).strip()
+        # Split by commas and clean up
+        countries = [c.strip() for c in re.split(r'[,\s]+', country_str) if c.strip()]
+        
+        if countries:
+            detailed_message = f"This video appears to be geo-restricted and is only available in: {', '.join(countries)}."
+        else:
+            detailed_message = "This video appears to be geo-restricted to specific countries."
+    else:
+        detailed_message = "This video appears to be geo-restricted and is not available in your server's region."
+    
+    return is_geo_restricted, countries, detailed_message
+
+@app.route('/debug_fetch', methods=['POST'])
+def debug_fetch():
+    """
+    Debug endpoint to help diagnose YouTube fetching issues.
+    Returns detailed information about what's happening with yt-dlp.
+    """
+    data = request.get_json()
+    url = data.get('url')
+    cookies_content = data.get('cookies_content', '')
+    user_agent = data.get('user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
+    
+    if not url:
+        return jsonify({'error': 'URL parameter is required'}), 400
+    
+    app.logger.info(f"Received /debug_fetch request for URL: {url}")
+    
+    result = {
+        'url': url,
+        'video_id': extract_video_id(url),
+        'has_cookies': bool(cookies_content and cookies_content.strip()),
+        'user_agent': user_agent,
+        'attempts': [],
+        'warnings': [],
+        'success': False,
+        'error': None
+    }
+    
+    cookies_file_path = None
+    if cookies_content:
+        try:
+            cookies_file_path = create_cookie_file(cookies_content, f"debug_{int(time.time())}")
+            result['cookie_file_created'] = bool(cookies_file_path)
+            result['cookie_file_path'] = cookies_file_path
+        except Exception as e:
+            result['warnings'].append(f"Error creating cookie file: {str(e)}")
+    
+    # Prepare options for debugging
+    ydl_opts = {
+        'quiet': True,  # We'll handle logging ourselves
+        'no_warnings': False,
+        'skip_download': True,
+        'noplaylist': True,
+        'forcejson': True,
+        'socket_timeout': 30,
+        'retries': 3,
+        'verbose': True,  # Turn on verbose logging
+        'logger': app.logger  # Use Flask's logger to capture output
+    }
+    
+    # Add cookies if available
+    if cookies_file_path:
+        ydl_opts['cookiefile'] = cookies_file_path
+    
+    # Add User-Agent
+    if user_agent:
+        ydl_opts['user_agent'] = user_agent
+        ydl_opts['http_headers'] = {'User-Agent': user_agent}
+    
+    # First attempt - with provided options
+    attempt_result = {
+        'attempt_number': 1,
+        'with_cookies': bool(cookies_file_path),
+        'with_user_agent': bool(user_agent),
+        'success': False,
+        'error': None,
+        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        
+        if info:
+            attempt_result['success'] = True
+            attempt_result['title'] = info.get('title', 'Unknown')
+            attempt_result['duration'] = info.get('duration', 0)
+            attempt_result['channel'] = info.get('channel', 'Unknown')
+            result['success'] = True
+            result['video_info'] = {
+                'title': info.get('title', 'Unknown'),
+                'uploader': info.get('uploader', 'Unknown'),
+                'duration': info.get('duration', 0),
+                'format_count': len(info.get('formats', [])),
+                'view_count': info.get('view_count', 'Unknown'),
+                'upload_date': info.get('upload_date', 'Unknown')
+            }
+    except yt_dlp.utils.DownloadError as e:
+        error_str = str(e)
+        attempt_result['error'] = error_str
+        attempt_result['success'] = False
+        
+        # Check for common errors
+        error_lower = error_str.lower()
+        if "429" in error_lower:
+            attempt_result['error_type'] = 'RATE_LIMIT'
+        elif any(pattern in error_lower for pattern in ["unavailable", "private", "removed"]):
+            attempt_result['error_type'] = 'VIDEO_UNAVAILABLE' 
+        elif "age" in error_lower or "confirm your age" in error_lower:
+            attempt_result['error_type'] = 'AGE_RESTRICTED'
+        elif "geo" in error_lower or "not available in your country" in error_lower:
+            attempt_result['error_type'] = 'GEO_RESTRICTED'
+        else:
+            attempt_result['error_type'] = 'OTHER'
+        
+        result['error'] = error_str
+    except Exception as e:
+        attempt_result['error'] = f"General exception: {str(e)}"
+        attempt_result['error_type'] = 'GENERAL_EXCEPTION'
+        result['error'] = str(e)
+    
+    result['attempts'].append(attempt_result)
+    
+    # Only try additional attempts if first one failed
+    if not attempt_result['success']:
+        # Second attempt - without cookies if first attempt used them
+        if cookies_file_path:
+            attempt_result = {
+                'attempt_number': 2,
+                'with_cookies': False,
+                'with_user_agent': bool(user_agent),
+                'success': False,
+                'error': None,
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            try:
+                ydl_opts_no_cookies = ydl_opts.copy()
+                if 'cookiefile' in ydl_opts_no_cookies:
+                    del ydl_opts_no_cookies['cookiefile']
+                
+                with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                
+                if info:
+                    attempt_result['success'] = True
+                    attempt_result['title'] = info.get('title', 'Unknown')
+                    attempt_result['duration'] = info.get('duration', 0)
+                    attempt_result['channel'] = info.get('channel', 'Unknown')
+                    result['success'] = True
+                    result['video_info'] = {
+                        'title': info.get('title', 'Unknown'),
+                        'uploader': info.get('uploader', 'Unknown'),
+                        'duration': info.get('duration', 0),
+                        'format_count': len(info.get('formats', [])),
+                        'view_count': info.get('view_count', 'Unknown'),
+                        'upload_date': info.get('upload_date', 'Unknown')
+                    }
+            except yt_dlp.utils.DownloadError as e:
+                error_str = str(e)
+                attempt_result['error'] = error_str
+                attempt_result['success'] = False
+                
+                # Check for common errors (same as above)
+                error_lower = error_str.lower()
+                if "429" in error_lower:
+                    attempt_result['error_type'] = 'RATE_LIMIT'
+                elif any(pattern in error_lower for pattern in ["unavailable", "private", "removed"]):
+                    attempt_result['error_type'] = 'VIDEO_UNAVAILABLE' 
+                elif "age" in error_lower or "confirm your age" in error_lower:
+                    attempt_result['error_type'] = 'AGE_RESTRICTED'
+                elif "geo" in error_lower or "not available in your country" in error_lower:
+                    attempt_result['error_type'] = 'GEO_RESTRICTED'
+                else:
+                    attempt_result['error_type'] = 'OTHER'
+                
+                if not result['error']:
+                    result['error'] = error_str
+                    
+            except Exception as e:
+                attempt_result['error'] = f"General exception: {str(e)}"
+                attempt_result['error_type'] = 'GENERAL_EXCEPTION'
+                if not result['error']:
+                    result['error'] = str(e)
+            
+            result['attempts'].append(attempt_result)
+    
+    # Clean up cookie file
+    if cookies_file_path and os.path.exists(cookies_file_path):
+        try:
+            os.remove(cookies_file_path)
+            result['warnings'].append("Cookie file removed")
+        except:
+            result['warnings'].append("Failed to remove cookie file")
+    
+    return jsonify(result)
 
 if __name__ == '__main__':
     # When running locally, Flask's dev server is fine.
