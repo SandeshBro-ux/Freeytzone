@@ -1,0 +1,22 @@
+# Netscape HTTP Cookie File - Example of COMPLETE YouTube authentication cookies
+# This is a reference file showing what properly authenticated YouTube cookies should include.
+# The SID, HSID, SSID, APISID, SAPISID, and LOGIN_INFO cookies are crucial for authenticated access.
+
+.youtube.com	TRUE	/	TRUE	1980000000	SID	xxxxxxxxxxx.yyyyyyyyyyy.zzzzzzzzzzz
+.youtube.com	TRUE	/	TRUE	1980000000	HSID	AAAAAAAAAAAAAAAAAA
+.youtube.com	TRUE	/	TRUE	1980000000	SSID	BBBBBBBBBBBBBBBBBB
+.youtube.com	TRUE	/	TRUE	1980000000	APISID	CCCCCCCCCCCCCCCCCC/DDDDDDDDDDDDDDDDD
+.youtube.com	TRUE	/	TRUE	1980000000	SAPISID	EEEEEEEEEEEEEEEEEE/FFFFFFFFFFFFFFFFF
+.youtube.com	TRUE	/	TRUE	1980000000	__Secure-1PAPISID	EEEEEEEEEEEEEEEEEE/FFFFFFFFFFFFFFFFF
+.youtube.com	TRUE	/	TRUE	1980000000	__Secure-3PAPISID	EEEEEEEEEEEEEEEEEE/FFFFFFFFFFFFFFFFF
+.youtube.com	TRUE	/	TRUE	1980000000	LOGIN_INFO	AFmmF2swRQIxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxyyyyyyyyyyyyyy
+.youtube.com	TRUE	/	TRUE	1980000000	__Secure-1PSID	xxxxxxxxxxx.yyyyyyyyyyy.zzzzzzzzzzz
+.youtube.com	TRUE	/	TRUE	1980000000	__Secure-3PSID	xxxxxxxxxxx.yyyyyyyyyyy.zzzzzzzzzzz
+
+# Additional common YouTube cookies that aren't as critical for authentication
+.youtube.com	TRUE	/	TRUE	1980000000	PREF	f6=40000000&tz=UTC
+.youtube.com	TRUE	/	TRUE	1980000000	VISITOR_INFO1_LIVE	ABCDEFGHIJK-LMNO
+.youtube.com	TRUE	/	TRUE	1980000000	YSC	ABCDEFGHIJKL
+.youtube.com	TRUE	/	TRUE	1980000000	GPS	1
+.youtube.com	TRUE	/	TRUE	1980000000	VISITOR_PRIVACY_METADATA	AAAAAAAAAAAA
+.youtube.com	TRUE	/	TRUE	1980000000	__Secure-YEC	ABCDEFGHIJKLM-NOPQ 

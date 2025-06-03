@@ -286,27 +286,33 @@ def fetch_info():
             except yt_dlp.utils.DownloadError as err:
                 error_str = str(err) # Keep original case for detailed logging
                 app.logger.error(f"yt-dlp DownloadError WITH cookies for {url}: {error_str}")
+                
+                # Store the error message for later specific error handling
+                app._last_yt_dlp_error = error_str
+                
+                # Check for 429 rate limit
                 if "http error 429" in error_str.lower() or "too many requests" in error_str.lower():
                     encountered_429 = True
-                    # VPNBook rotation logic (only if SHOULD_USE_VPNBOOK and no YTDLP_PROXY_URL_ENV was set)
-                    if SHOULD_USE_VPNBOOK and not YTDLP_PROXY_URL_ENV:
-                        app.logger.warning(f"Encountered 429 WITH cookies. VPNBook is active. Attempting to rotate proxy.")
-                        mark_proxy_failed() # Mark the current one (if it was from VPNBook)
-                        try:
-                            new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
-                            if new_proxy_url:
-                                app.logger.info(f"Rotated VPNBook proxy after 429 to: {'*****'.join(new_proxy_url.split('@')[0].split(':'))}@{new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
-                                ydl_opts_with_cookies_retry = ydl_opts_with_cookies.copy()
-                                ydl_opts_with_cookies_retry['proxy'] = new_proxy_url
-                                app.logger.debug(f"Retrying yt-dlp options (with cookies, new proxy): {json.dumps(ydl_opts_with_cookies_retry, indent=2)}")
-                                with yt_dlp.YoutubeDL(ydl_opts_with_cookies_retry) as ydl_retry:
-                                    info_dict = ydl_retry.extract_info(url, download=False)
-                                app.logger.info(f"yt-dlp fetch WITH cookies and new proxy successful for {url}")
-                                encountered_429 = False # Reset flag as it worked
-                            else:
-                                app.logger.warning("Failed to get a new VPNBook proxy after 429.")
-                        except Exception as e_proxy_rotate:
-                            app.logger.error(f"Error rotating VPNBook proxy: {e_proxy_rotate}")
+                    app.logger.warning(f"YouTube rate limiting detected (429) for {url}")
+                # VPNBook rotation logic (only if SHOULD_USE_VPNBOOK and no YTDLP_PROXY_URL_ENV was set)
+                if SHOULD_USE_VPNBOOK and not YTDLP_PROXY_URL_ENV:
+                    app.logger.warning(f"Encountered 429 WITH cookies. VPNBook is active. Attempting to rotate proxy.")
+                    mark_proxy_failed() # Mark the current one (if it was from VPNBook)
+                    try:
+                        new_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL, renew=True)
+                        if new_proxy_url:
+                            app.logger.info(f"Rotated VPNBook proxy after 429 to: {'*****'.join(new_proxy_url.split('@')[0].split(':'))}@{new_proxy_url.split('@')[1] if '@' in new_proxy_url else new_proxy_url}")
+                            ydl_opts_with_cookies_retry = ydl_opts_with_cookies.copy()
+                            ydl_opts_with_cookies_retry['proxy'] = new_proxy_url
+                            app.logger.debug(f"Retrying yt-dlp options (with cookies, new proxy): {json.dumps(ydl_opts_with_cookies_retry, indent=2)}")
+                            with yt_dlp.YoutubeDL(ydl_opts_with_cookies_retry) as ydl_retry:
+                                info_dict = ydl_retry.extract_info(url, download=False)
+                            app.logger.info(f"yt-dlp fetch WITH cookies and new proxy successful for {url}")
+                            encountered_429 = False # Reset flag as it worked
+                        else:
+                            app.logger.warning("Failed to get a new VPNBook proxy after 429.")
+                    except Exception as e_proxy_rotate:
+                        app.logger.error(f"Error rotating VPNBook proxy: {e_proxy_rotate}")
                 # If still no info_dict after potential retry, it remains None
                 if not info_dict: info_dict = None 
             except Exception as e_generic:
@@ -353,16 +359,27 @@ def fetch_info():
         
         if not info_dict:
             app.logger.error(f"Failed to fetch video info from yt-dlp after all attempts for {url}. Encountered 429: {encountered_429}")
+            
+            # Capture last error message for more specific feedback
+            last_error_msg = "The content may be unavailable, private, or an unknown yt-dlp error occurred."
+            
+            # Check if the error contains "Video unavailable" which is a specific YouTube error
+            # This typically means the video is genuinely unavailable rather than an access issue
+            if hasattr(app, '_last_yt_dlp_error') and app._last_yt_dlp_error:
+                if "video unavailable" in app._last_yt_dlp_error.lower():
+                    last_error_msg = "This video is not available. It may be private, deleted, age-restricted, or region-blocked in our server's location."
+                    app.logger.warning(f"YouTube reports video {video_id} is unavailable. This is likely a genuine content restriction, not an error in our code.")
+                elif "http error 429" in app._last_yt_dlp_error.lower() or "too many requests" in app._last_yt_dlp_error.lower():
+                    encountered_429 = True
+            
             if encountered_429:
-                return jsonify({'error': 'YouTube is rate-limiting requests from this server. Please provide fresh cookies or try again much later. Using a different User-Agent might also help.'}), 429
+                return jsonify({
+                    'error': 'YouTube is rate-limiting requests from this server. Please provide fresh cookies or try again much later. Using a different User-Agent might also help.'
+                }), 429
             else:
-                # Try to get the original error message from yt-dlp if available
-                # This part is tricky as the error is caught and logged above.
-                # We can pass a generic message or try to capture the last error.
-                # For now, a generic message.
-                last_error_msg = "The content may be unavailable, private, or an unknown yt-dlp error occurred."
-                # A more robust way would be to store the last exception string.
-                return jsonify({'error': f'Failed to fetch video info from yt-dlp. {last_error_msg}'}), 500
+                return jsonify({
+                    'error': f'Failed to fetch video info from yt-dlp. {last_error_msg}'
+                }), 500
 
         app.logger.info(f"Successfully fetched info_dict for {url}. Title: {info_dict.get('title')}")
         
