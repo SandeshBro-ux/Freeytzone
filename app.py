@@ -194,6 +194,7 @@ def fetch_info():
     data = request.get_json()
     url = data.get('url')
     cookies_content = data.get('cookies_content')
+    user_agent_from_client = data.get('user_agent')
 
     if not url:
         return jsonify({'error': 'URL is required'}), 400
@@ -217,9 +218,18 @@ def fetch_info():
             'skip_download': True,
             'forcejson': True,
             'youtube_skip_dash_manifest': True,
-            # Default User-Agent
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'noprogress': True,
+            'no_color': True,
+            'nocheckcertificate': True,  # Added for HTTPS connections
         }
+        
+        # Set User-Agent
+        if user_agent_from_client and user_agent_from_client.strip():
+            print(f"Using client-provided User-Agent: {user_agent_from_client}")
+            base_ydl_opts['user_agent'] = user_agent_from_client
+        else:
+            print("Using default User-Agent")
+            base_ydl_opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         
         # Add proxy if available
         current_proxy_url = YTDLP_PROXY_URL
@@ -227,11 +237,11 @@ def fetch_info():
             # Try to get a fresh VPNBook proxy URL
             try:
                 current_proxy_url = get_ytdlp_proxy_url(VPNBOOK_COUNTRY, VPNBOOK_PROTOCOL)
+                if current_proxy_url:
+                    print(f"Using proxy for fetch_info: {current_proxy_url.split('@')[1] if '@' in current_proxy_url else current_proxy_url}")
+                    base_ydl_opts['proxy'] = current_proxy_url
             except Exception as e:
                 print(f"Error getting VPNBook proxy URL: {e}")
-
-        if current_proxy_url:
-            base_ydl_opts['proxy'] = current_proxy_url
 
         # Attempt 1: With cookies (if provided)
         if cookies_file_path:
@@ -352,8 +362,8 @@ def fetch_info():
                 jar.load(cookies_file_path, ignore_discard=True, ignore_expires=True)
                 session.cookies = jar
             
-            # Use a browser-like user agent to help avoid detection
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            # Use the same User-Agent as yt-dlp
+            headers = {'User-Agent': base_ydl_opts['user_agent']}
             resp = session.get(url, headers=headers, timeout=10)
             
             if resp.status_code == 200:
@@ -452,6 +462,7 @@ def download_video():
     url = data.get('url')
     quality = data.get('quality', 'best')
     cookies_content = data.get('cookies_content')
+    user_agent_from_client = data.get('user_agent')
 
     if not url or not quality:
         return jsonify({'error': 'URL and quality are required'}), 400
@@ -465,7 +476,6 @@ def download_video():
         download_path = app.config['DOWNLOAD_FOLDER']
         
         base_ydl_opts = {
-            'cookiefile': cookies_file_path,
             'noplaylist': True,
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'noprogress': True,
@@ -473,17 +483,38 @@ def download_video():
             'quiet': True,
             'nopart': True,
             'continuedl': False,
-            'http_headers': { # These are for direct HTTP requests if yt-dlp makes them, distinct from UA for yt-dlp itself
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'no_color': True,
+            'nocheckcertificate': True,  # Added for HTTPS connections
+            'youtube_skip_dash_manifest': True,
+        }
+
+        # Set User-Agent and HTTP headers consistently
+        if user_agent_from_client and user_agent_from_client.strip():
+            print(f"Using client-provided User-Agent for download: {user_agent_from_client}")
+            base_ydl_opts['user_agent'] = user_agent_from_client
+            base_ydl_opts['http_headers'] = {
+                'User-Agent': user_agent_from_client,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'DNT': '1',
                 'Connection': 'keep-alive',
-            },
-            'youtube_skip_dash_manifest': True,
-            # Default User-Agent for yt-dlp internal operations
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+            }
+        else:
+            print("Using default User-Agent for download")
+            default_ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            base_ydl_opts['user_agent'] = default_ua
+            base_ydl_opts['http_headers'] = {
+                'User-Agent': default_ua,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+            }
+
+        # Add cookies if provided
+        if cookies_file_path:
+            base_ydl_opts['cookiefile'] = cookies_file_path
+            print(f"Using cookies file for download: {cookies_file_path}")
 
         # Add proxy if available
         current_proxy_url = YTDLP_PROXY_URL
